@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>個股深度分析</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<style>
+/* 本頁專屬（.card/.badge/.up/.down/.loading 等已在 base.css） */
+/* ── 版面：寬螢幕多欄，窄螢幕單欄（B7）──────────────────
+   原本 max-width:920px 在 3440 寬的螢幕上只用了 27%，8 個區塊往下疊
+   要捲近兩屏。改成「上方主區 + 下方多欄流動」：
+     · 主區固定放 K 線（最需要寬度）與即時判讀，一屏內看得到
+     · 其餘分析區塊用 CSS multi-column 自動填滿，欄數隨視窗增減
+   為什麼用 multi-column 而不是 grid：各區塊高度差很多（77~391px），
+   grid 同列會對齊到最高者留下大片空白；multicol 是接續流動，不留洞。 */
+
+/* 上方主區：K 線 + 側邊判讀 */
+#top{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--gap-md);
+  margin-bottom:var(--gap-md)}
+#topSide{display:flex;flex-direction:column;gap:var(--gap-md);min-width:0}
+
+/* 下方分析區塊：由 TQMasonry 分欄（貪婪填最矮欄，欄高最齊）*/
+#panes.masonry{display:flex;gap:var(--gap-md);align-items:flex-start}
+#panes.masonry > .mcol{flex:1;min-width:0}
+.pane{margin-bottom:var(--gap-md)}
+.pane > .sec-h{margin-top:0}
+
+/* K 線高度隨視窗長高，但留下方多欄的空間 */
+#klineBox{width:100%;height:clamp(300px,42vh,560px)}
+
+@media (min-width:1100px){ #top{grid-template-columns:minmax(0,1fr) 340px} }
+@media (min-width:1700px){ #top{grid-template-columns:minmax(0,1fr) 380px} }
+@media (min-width:2600px){ #top{grid-template-columns:minmax(0,1fr) 420px} }
+.searchbar{display:flex;gap:8px;flex:1;min-width:260px;max-width:520px}
+.searchbar input{flex:1;background:var(--border);border:none;color:var(--text);padding:7px 12px;border-radius:var(--r-md);font-size:var(--fs-lg)}
+.searchbar button{background:var(--border);border:none;color:var(--purple);padding:7px 16px;border-radius:var(--r-md);cursor:pointer}
+.l1{background:var(--card);border-radius:var(--r-lg);padding:16px 18px;margin-bottom:6px}
+.l1-top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px}
+.l1 .name{font-size:var(--fs-2xl);font-weight:600}
+.l1 .code{font-size:var(--fs-md);color:var(--muted)}
+/* 主角數字，刻意比 --fs-2xl(26px) 再大一級 */
+.l1 .price{font-size:34px;font-weight:700;text-align:right}
+.l1 .chg{font-size:var(--fs-lg);text-align:right}
+/* 本頁徽章比表格內的大（base.css 的 .badge 是終端尺寸） */
+.l1 .badge{font-size:var(--fs-lg);padding:5px 16px;border-radius:14px}
+.l1 .reason{font-size:var(--fs-md);color:var(--sub);margin-top:12px;line-height:1.5}
+.l1 .meta{font-size:var(--fs-sm);color:var(--muted);margin-top:6px}
+.sec-h{font-size:var(--fs-sm);color:var(--purple);font-weight:600;
+  letter-spacing:1px;margin:16px 4px 8px}
+.l2{background:var(--card);border-radius:var(--r-lg);padding:14px 18px}
+.factor{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.factor:last-child{margin-bottom:0}
+.factor .fl{font-size:var(--fs-md);width:42px;color:var(--sub)}
+.factor .bar{flex:1;height:18px;background:var(--deep);border-radius:9px;
+  position:relative;overflow:hidden}
+.factor .fill{position:absolute;top:0;height:100%;border-radius:9px}
+.factor .mid{position:absolute;left:50%;top:0;width:1px;height:100%;background:var(--border-hi)}
+.factor .fv{font-size:var(--fs-md);width:46px;text-align:right;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.cell{background:var(--card);border-radius:var(--r-md);padding:10px 12px}
+.cell .k{font-size:var(--fs-xs);color:var(--muted);margin-bottom:3px}
+.cell .v{font-size:var(--fs-xl);font-weight:600}
+.cell .sub{font-size:var(--fs-tiny);color:var(--muted);margin-top:2px}
+table{width:100%;border-collapse:collapse;font-size:var(--fs-sm);
+  background:var(--card);border-radius:var(--r-md);overflow:hidden}
+th{background:var(--raised);color:var(--purple);padding:8px;text-align:right;font-weight:600}
+th:first-child,td:first-child{text-align:left}
+td{padding:7px 8px;border-top:1px solid #232338;text-align:right}
+.news-item{background:var(--card);border-radius:var(--r-md);padding:10px 12px;margin-bottom:6px}
+.news-item .t{font-size:var(--fs-md);line-height:1.4}
+.news-item .m{font-size:var(--fs-tiny);color:var(--muted);margin-top:3px}
+.loading{padding:40px}
+.chartbox{background:var(--card);border-radius:var(--r-lg);padding:10px}
+.acc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+/* border:none 不能省。表單元件（input/button）有瀏覽器預設的
+   `border:2px inset`，只把作者的 `border:1px solid …` 刪掉，
+   反而會露出**更粗**的預設框——實測從 1px 變成 2px。 */
+.btn-alert{background:var(--border);border:none;color:var(--yellow);border-radius:var(--r-md);padding:8px 14px;
+  font-size:var(--fs-md);cursor:pointer}
+.btn-alert:hover{background:var(--border-hi)}
+</style>
+<script src="./assets/tq.js?v=2026090106"></script>
+<script src="./assets/kline.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+<div class="topbar">
+  <span class="brand">台股量化</span>
+  <div class="nav">
+    <a href="./index.html">總覽</a>
+    <a href="./market.html">市場結構</a>
+    <a href="./network.html">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330" class="on">個股深度</a>
+    <a href="./analytics.html">模型績效</a>
+    <a href="./learn.html">名詞解說</a>
+  </div>
+<div class="searchbar">
+  <input id="q" placeholder="輸入股票代號（如 2330）" inputmode="numeric" maxlength="6"
+    onkeydown="if(event.key==='Enter')go()">
+  <button onclick="go()">查詢</button>
+</div>
+  <span class="theme-sw" id="themeSw"></span>
+</div>
+<div id="content"><div class="loading">載入中...</div></div>
+<script>
+function sid(){ const q=new URLSearchParams(location.search).get('sid'); return (q && /^\d{4,6}$/.test(q)) ? q : '2330'; }
+function go(){ const v=document.getElementById('q').value.trim(); if(v)location.href='./stock_detail.html?sid='+v; }
+// 格式化與顏色改用共用工具（tq.js）
+const fnum=(v,d)=>TQ.num(v,d==null?2:d);
+const fmtChip=(v)=>TQ.chip(v);
+const bc=(v)=>TQ.signColor(v);
+const V=(name)=>TQ.cssVar(name);   // 色碼一律讀 tokens.css
+function factorBar(label,v){
+  v=v||0; const pct=Math.min(Math.abs(v)*50,50); const left=v>=0?50:50-pct;
+  return `<div class="factor"><span class="fl">${label}</span>
+    <div class="bar"><div class="mid"></div>
+    <div class="fill" style="left:${left}%;width:${pct}%;background:${bc(v)}"></div></div>
+    <span class="fv" style="color:${bc(v)}">${(v>=0?'+':'')+v.toFixed(2)}</span></div>`;
+}
+/* 月營收。台股每月 10 日前公佈上月營收，是最即時的基本面訊號
+   （F-Score 用季報，慢一整個季度）。
+
+   ⚠ 它**沒有**併進綜合分——新因子要先驗預測力才納入。這裡只顯示，
+   所以標題寫「月營收（未納入評分）」，免得被誤以為訊號已經反映了它。
+
+   金額單位是千元（交易所原樣），顯示時換成億元比較好讀。 */
+function revenueCells(r) {
+  if (!r || r.revenue == null) return '';
+  const yi = r.revenue / 100000;          // 千元 -> 億元
+  const amt = yi >= 1 ? yi.toFixed(1) + ' 億' : (r.revenue / 1000).toFixed(1) + ' 百萬';
+  return cell(`月營收 ${r.ym}`, amt, '未納入評分') +
+    cell('營收年增', r.yoy_pct == null ? '—' : TQ.pctRaw(r.yoy_pct),
+         '與去年同月比', r.yoy_pct >= 0 ? V('--green') : V('--red')) +
+    cell('營收月增', r.mom_pct == null ? '—' : TQ.pctRaw(r.mom_pct),
+         '與上月比', r.mom_pct >= 0 ? V('--green') : V('--red'));
+}
+
+/* 財報體質（季報）。同樣**沒有**併進綜合分。
+
+   `not_applicable` 要跟「沒抓到」分開顯示：金控／保險／證券的損益表
+   沒有「營業收入」這個概念，交易所把它們放在另外幾張表，所以營益分析
+   本來就查不到。全部畫成「—」的話，使用者會以為是資料漏了。 */
+function financialCells(f) {
+  if (!f) return '';
+  if (f.not_applicable) {
+    return cell('財報體質', '不適用', '金融業損益表結構不同');
+  }
+  if (f.period == null) return '';
+  const pc = (v) => v == null ? '—' : TQ.num(v, 1) + '%';
+  const good = (v, hi) => v == null ? null : (v >= hi ? V('--green') : null);
+  return cell(`毛利率 ${f.period}`, pc(f.gross_margin), '未納入評分',
+              good(f.gross_margin, 30)) +
+    cell('營業利益率', pc(f.op_margin), '本業賺不賺錢', good(f.op_margin, 15)) +
+    cell('稅後淨利率', pc(f.net_margin), '', good(f.net_margin, 10)) +
+    cell('負債比', pc(f.debt_ratio), '越低越穩健',
+         f.debt_ratio == null ? null
+           : (f.debt_ratio <= 40 ? V('--green')
+              : f.debt_ratio >= 70 ? V('--red') : null)) +
+    cell('每股淨值', f.book_value == null ? '—' : fnum(f.book_value, 2) + ' 元', '');
+}
+
+function cell(k,v,sub,color){
+  return `<div class="cell"><div class="k">${k}</div>
+    <div class="v"${color?` style="color:${color}"`:''}>${v}</div>
+    ${sub?`<div class="sub">${sub}</div>`:''}</div>`;
+}
+async function load(){
+  const id=sid(); document.getElementById('q').value=id;
+  const d=await TQ.api('/api/stock_detail/'+id);
+  if(d._error||!d.stock_id){
+    TQ.html('content','<div class="loading">查無資料'+
+      (d._error?'：'+TQ.esc(d._error):'')+'</div>');
+    return;
+  }
+  render(d);
+}
+function render(d){
+  const chg=d.change||0, cls=chg>0?'up':chg<0?'down':'flat', sign=chg>=0?'+':'';
+  const sig=d.signal||'HOLD';
+  const ind=d.indicators||{}, ch=d.chips||{}, fu=d.fundamental||{}, fa=d.factors||{};
+  let h=`<div class="l1"><div class="l1-top">
+    <div><div class="name">${d.name||''} <span class="code">${d.stock_id}</span></div>
+      <div style="margin-top:8px"><span class="badge badge-${sig}">${sig}</span>
+      <span style="font-size:var(--fs-md);color:var(--muted);margin-left:8px">信心 ${Math.round((d.confidence||0)*100)}%</span></div></div>
+    <div><div class="price ${cls}">${fnum(d.close)}</div>
+      <div class="chg ${cls}">${sign}${fnum(chg)} (${sign}${fnum(d.change_pct)}%)</div></div></div>
+    <div class="reason">${d.reason||''}</div>
+    <div class="meta">大盤：${d.regime||'—'} ｜ 綜合評分：${fnum(d.composite_score,3)}</div>
+    <div style="margin-top:10px"><button class="btn-alert" onclick="setAlert()">⏰ 設定價格警報</button></div></div>`;
+  // ── 上方主區：K 線（吃寬度）＋ 側邊即時判讀 ──────────────
+  h+=`<div id="top">
+    <div>
+      <div class="sec-h" style="margin-top:0">K 線走勢</div>
+      <div class="chartbox"><div id="klineBox"></div>
+      <div style="font-size:var(--fs-tiny);color:var(--muted);margin-top:6px;text-align:center">
+        <span style="color:var(--purple)">━</span>MA5 <span style="color:var(--blue)">━</span>MA20
+        <span style="color:var(--orange)">━</span>MA60 ｜ 🔺買訊 🔻賣訊</div></div>
+    </div>
+    <div id="topSide">
+      <div>
+        <div class="sec-h" style="margin-top:0">四因子評分（-1 空 ～ +1 多）</div>
+        <div class="l2">
+          ${factorBar('技術',fa.tech)}${factorBar('籌碼',fa.chip)}
+          ${factorBar('情緒',fa.sent)}${factorBar('基本',fa.fund)}</div>
+      </div>
+      <div>
+        <div class="sec-h" style="margin-top:0">系統對這檔的預測準度</div>
+        <div id="accBox" class="acc-grid">
+          <div class="loading" style="padding:16px">載入中...</div></div>
+      </div>
+    </div>
+  </div>`;
+
+  // ── 下方：多欄流動的分析區塊 ─────────────────────────────
+  h+=`<div id="panes">`;
+
+  h+=`<div class="pane"><div class="sec-h">因子貢獻（誰把總分拉上來 / 拖下去）</div>
+      <div class="chartbox"><canvas id="waterfallChart" height="120"></canvas></div></div>`;
+
+  h+=`<div class="pane"><div class="sec-h">系統評分 vs 股價走勢（分數領先還是落後？）</div>
+      <div class="chartbox"><canvas id="scoreChart" height="150"></canvas>
+      <div style="font-size:var(--fs-tiny);color:var(--muted);margin-top:6px">
+        藍=股價、紫=綜合評分。評分在股價轉折「之前」上升＝系統有領先性。</div></div></div>`;
+  const rsi=ind.rsi14, rsiC=rsi==null?null:(rsi>70?V('--red'):rsi<30?V('--green'):null);
+  h+=`<div class="pane"><div class="sec-h">關鍵指標</div><div class="grid">
+    ${cell('RSI(14)',fnum(rsi,1),rsi>70?'超買':rsi<30?'超賣':'',rsiC)}
+    ${cell('MACD柱',fnum(ind.macd_hist,2),ind.macd_hist>0?'多方動能':'空方動能',ind.macd_hist>0?V('--green'):V('--red'))}
+    ${cell('KD',fnum(ind.stoch_k,0)+' / '+fnum(ind.stoch_d,0),'K / D')}
+    ${cell('ADX',fnum(ind.adx,0),ind.adx>25?'趨勢明確':'盤整',ind.adx>25?V('--green'):V('--muted'))}
+    ${cell('月線乖離',fnum(ind.bias20,1)+'%',ind.bias20>=0?'價在月線上':'價在月線下',ind.bias20>=0?V('--green'):V('--red'))}
+    ${cell('量比',fnum(ind.vol_ratio,2),ind.vol_ratio>1.5?'放量':'',ind.vol_ratio>1.5?V('--yellow'):null)}
+    ${cell('外資買賣超',fmtChip(ch.foreign_net),'',ch.foreign_net>=0?V('--green'):V('--red'))}
+    ${cell('近5日法人',fmtChip(ch.chip_5d),ch.consecutive_buy>0?'連'+ch.consecutive_buy+'日買超':'',ch.chip_5d>=0?V('--green'):V('--red'))}
+    ${cell('F-Score',fu.f_score==null?'—':fu.f_score+' / 9',fu.f_score>=7?'財務強健':fu.f_score<=3?'財務偏弱':'',fu.f_score>=7?V('--green'):fu.f_score<=3?V('--red'):null)}
+    ${cell('本益比',fnum(fu.pe_ratio,1),fu.health_label||'')}
+    ${revenueCells(d.revenue)}
+    ${financialCells(d.financial)}
+  </div></div>`;
+  if(d.history&&d.history.length){
+    let rows='';
+    d.history.forEach(x=>{
+      const f20=x.fwd20, f5=x.fwd5;
+      rows+=`<tr><td>${x.date}</td><td>${fnum(x.score,2)}</td><td>${x.signal||''}</td>
+        <td class="${f5>=0?'up':'down'}">${f5==null?'—':(f5>=0?'+':'')+(f5*100).toFixed(1)+'%'}</td>
+        <td class="${f20>=0?'up':'down'}">${f20==null?'—':(f20>=0?'+':'')+(f20*100).toFixed(1)+'%'}</td></tr>`;
+    });
+    h+=`<div class="pane"><div class="sec-h">歷史評分 vs 實際漲幅（系統準不準）</div>
+      <table><thead><tr><th>日期</th><th>評分</th><th>訊號</th><th>5日後</th><th>20日後</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+  if(d.news&&d.news.length){
+    let nh='';
+    d.news.forEach(n=>{
+      const lbl=n.sentiment_label||'neutral';
+      const dot=lbl==='positive'?'🟢':lbl==='negative'?'🔴':'⚪';
+      nh+=`<div class="news-item"><div class="t">${dot} ${n.title||''}</div>
+        <div class="m">${n.source||''} ${(n.published_at||'').substring(0,16)}</div></div>`;
+    });
+    h+=`<div class="pane"><div class="sec-h">近期新聞</div>${nh}</div>`;
+  }
+  h+=`</div>`;   // #panes
+  document.getElementById('content').innerHTML=h;
+  relayout();
+  _lastW=window.innerWidth;
+
+  drawWaterfall(d.factors||{});
+  drawKline();
+  drawScoreChart();
+  loadAccuracy();
+}
+
+async function drawWaterfall(fa){
+  const el=document.getElementById('waterfallChart');
+  if(!el)return;
+  await TQ.loadScript(TQ.CDN.chartjs);   // 條件載入
+  const items=[['技術',fa.tech],['籌碼',fa.chip],['情緒',fa.sent],['基本',fa.fund]];
+  new Chart(el,{type:'bar',
+    data:{labels:items.map(x=>x[0]),
+      datasets:[{data:items.map(x=>+(x[1]||0).toFixed(3)),
+        backgroundColor:items.map(x=>TQ.signColor(x[1]||0))}]},
+    options:{indexAxis:'y',plugins:{legend:{display:false},
+      tooltip:{callbacks:{label:c=>'分數 '+TQ.signed(c.raw,3)}}},
+      scales:{x:{min:-1,max:1,
+        grid:{color:c=>c.tick.value===0?'#585b70':TQ.cssVar('--border')},
+        ticks:{color:TQ.cssVar('--muted')}},
+        y:{ticks:{color:TQ.cssVar('--sub')},grid:{display:false}}}}});
+}
+
+// K 線改用共用元件（原本 27 行的重複實作 → 一行）
+let _kline=null;
+async function drawKline(){
+  // 高度由 CSS 的 #klineBox clamp() 決定，這裡讀回來給圖表庫，
+  // 不再寫死 300 —— 寬螢幕的縱向空間本來就該給 K 線
+  const box=document.getElementById('klineBox');
+  const h=box?box.clientHeight:300;
+  _kline=await TQKline.load('klineBox', `/api/kline/${sid()}?days=120`, {height:h});
+}
+
+async function drawScoreChart(){
+  const el=document.getElementById('scoreChart');
+  if(!el)return;
+  await TQ.loadScript(TQ.CDN.chartjs);
+  const d=await TQ.api(`/api/score_history/${sid()}?days=120`);
+  if(d._error||!d.dates||!d.dates.length){
+    el.parentElement.innerHTML='<div class="loading">評分歷史累積中（每日自動記錄）</div>';
+    return;
+  }
+  const BLUE=TQ.cssVar('--blue'), PURPLE=TQ.cssVar('--purple');
+  new Chart(el,{data:{labels:d.dates.map(x=>x.substring(5)),
+    datasets:[
+      {type:'line',label:'股價',data:d.close,borderColor:BLUE,
+       pointRadius:0,borderWidth:2,tension:.2,yAxisID:'y'},
+      {type:'line',label:'綜合評分',data:d.score,borderColor:PURPLE,
+       pointRadius:0,borderWidth:2,tension:.2,yAxisID:'y1'}]},
+    options:{interaction:{mode:'index',intersect:false},
+      plugins:{legend:{labels:{boxWidth:12,color:TQ.cssVar('--sub')}}},
+      scales:{
+        y:{position:'left',ticks:{color:BLUE},grid:{color:TQ.cssVar('--border')}},
+        y1:{position:'right',min:-1,max:1,ticks:{color:PURPLE},
+            grid:{color:c=>c.tick.value===0?'#585b70':'transparent'}},
+        x:{ticks:{color:TQ.cssVar('--muted'),maxTicksLimit:8},grid:{display:false}}}}});
+}
+
+async function loadAccuracy(){
+  const box=document.getElementById('accBox');
+  if(!box)return;
+  try{
+    const r=await fetch(`/api/accuracy/${sid()}`);
+    const d=(await r.json()).data||{};
+    const parts=[];
+    [['5日','d5'],['20日','d20']].forEach(([lbl,key])=>{
+      const a=d[key]||{};
+      if(!a.ready){
+        parts.push(cell(lbl+'準度','—',`樣本 ${a.n||0} 筆（需≥10）`));
+        return;
+      }
+      const ic=a.ts_ic;
+      parts.push(cell(lbl+'分數相關',(ic>=0?'+':'')+fnum(ic,3),
+        ic>0.05?'有正向預測力':ic<-0.05?'反向':'無明顯關係',
+        ic>0.05?V('--green'):ic<-0.05?V('--red'):null));
+      parts.push(cell(lbl+'高分日均報酬',
+        a.hi_avg_fwd==null?'—':(a.hi_avg_fwd>=0?'+':'')+(a.hi_avg_fwd*100).toFixed(2)+'%',
+        `樣本 ${a.n} 筆`,a.hi_avg_fwd>=0?V('--green'):V('--red')));
+    });
+    box.innerHTML=parts.join('');
+  }catch(e){box.innerHTML='<div class="loading">準度載入失敗</div>';}
+}
+
+async function setAlert(){
+  const cur=parseFloat(document.querySelector('.price')?.textContent||'0');
+  const v=prompt(`設定 ${sid()} 價格警報\n目前價 ${cur}\n\n輸入目標價（高於現價=突破提醒，低於=跌破提醒）：`);
+  if(!v)return;
+  const target=parseFloat(v);
+  if(!(target>0)){alert('請輸入有效價格');return;}
+  const cond=target>=cur?'above':'below';
+  try{
+    const r=await fetch('/api/alert',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({stock_id:sid(),target_price:target,condition:cond,note:'個股頁快捷設定'})});
+    const j=await r.json();
+    alert(j.ok?`✅ 已設定：${sid()} ${cond==='above'?'突破':'跌破'} ${target} 時通知`
+              :`❌ 設定失敗：${j.error||''}`);
+  }catch(e){alert('設定失敗：'+e.message);}
+}
+load();
+
+// 分析區塊分欄：斷點與上方主區一致
+function relayout(){ return TQMasonry.auto('panes'); }
+
+// 尺寸改變 → 重新分欄 + 重畫 K 線（高度是 vh 單位）。debounce 300ms。
+let _rsz, _lastW=0;
+function onResize(){
+  clearTimeout(_rsz);
+  _rsz=setTimeout(()=>{
+    // 寬度沒變就不用重排（ResizeObserver 也會因為高度變化而觸發）
+    if(Math.abs(window.innerWidth-_lastW) < 2) return;
+    _lastW=window.innerWidth;
+    relayout();
+    if(document.getElementById('klineBox')) drawKline();
+  }, 300);
+}
+window.addEventListener('resize', onResize);
+
+// 同時用 ResizeObserver 盯著容器本身。
+// 原因：這頁會被 PyQt 的 QWebEngineView 嵌入，拖曳桌面視窗時元素尺寸會變，
+// 但不保證每種情況都送出 window resize 事件。監看元素才是對的層級。
+if (window.ResizeObserver) {
+  new ResizeObserver(onResize).observe(document.documentElement);
+}
+</script></body></html>

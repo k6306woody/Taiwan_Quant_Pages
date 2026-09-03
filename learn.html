@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>名詞解說 — 台股量化系統</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<style>
+
+/* ── 版面：左心智圖 + 右詞條 ────────────────────────────
+   量測後的設計依據：104 節點／273 條邊、平均連線 5.2、最高 15。
+   **全圖畫在側欄是一團毛球**，所以改成「以當前詞條為中心的局部圖」——
+   單一詞條的鄰居數中位數只有 4，放射狀排開剛好看得清楚。 */
+#wrap{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--gap-md)}
+#mapCol{display:none}                     /* 窄螢幕不顯示，避免擠掉內容 */
+@media (min-width:1100px){
+  #wrap{grid-template-columns:330px minmax(0,1fr)}
+  #mapCol{display:block}
+}
+@media (min-width:2600px){
+  #wrap{grid-template-columns:400px minmax(0,1fr)}
+}
+#mapCol{position:sticky;top:var(--gap-lg);align-self:start}
+#mapBox{background:var(--card);border-radius:var(--r-lg);padding:10px}
+#mapBox .hd{font-size:var(--fs-sm);color:var(--purple);font-weight:600;
+  margin-bottom:2px;display:flex;justify-content:space-between;align-items:center}
+#mapBox .hint{font-size:var(--fs-tiny);color:var(--muted);margin-bottom:6px}
+#map{width:100%;height:auto;display:block}
+#map .node{cursor:pointer}
+#map .node:hover circle{stroke:var(--purple);stroke-width:2}
+#map .node:hover text{fill:var(--purple)}
+#map .edge{stroke:var(--border-hi);stroke-width:1.2;fill:none}
+#map .lbl{font-size:11.5px;fill:var(--sub);pointer-events:none}
+#map .lbl-c{font-size:13.5px;font-weight:600;fill:var(--text);pointer-events:none}
+#map .cnt{font-size:9.5px;fill:var(--muted);pointer-events:none}
+
+/* ── 完整關聯網路（力導向圖）───────────────────────────
+   側欄那張是「一個中心＋它的鄰居」，看不到整張網路。
+   這張是全部 104 個名詞、273 條連線一起攤開，
+   所以需要整個畫面的空間，做成覆蓋層。 */
+#netWrap{position:fixed;inset:0;z-index:50;background:var(--bg);
+  display:none;flex-direction:column;padding:var(--gap-md)}
+#netWrap.on{display:flex}
+#netBar{display:flex;align-items:center;gap:var(--gap-sm);
+  flex-wrap:wrap;margin-bottom:var(--gap-sm)}
+#netBar h2{font-size:var(--fs-lg);color:var(--purple);margin-right:4px}
+#netBar .hint{font-size:var(--fs-tiny);color:var(--muted)}
+#netLegend{display:flex;gap:5px;flex-wrap:wrap}
+#netLegend .lg{font-size:var(--fs-tiny);padding:3px 9px;border-radius:var(--r-sm);
+  cursor:pointer;background:var(--card)}
+#netLegend .lg.off{opacity:.35}
+#netLegend .lg i{display:inline-block;width:8px;height:8px;border-radius:50%;
+  margin-right:5px;vertical-align:middle}
+#net{flex:1;min-height:0;background:var(--card);
+  border-radius:var(--r-lg);overflow:hidden}
+#net svg.tqg{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+#net svg.tqg:active{cursor:grabbing}
+
+#q{flex:1;min-width:220px;max-width:460px;padding:7px 12px;font-size:var(--fs-lg)}
+
+/* 分類籤 */
+#cats{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:var(--gap-md)}
+#cats .btn{font-size:var(--fs-sm);padding:5px 12px}
+
+/* 詞條卡：磚牆分欄（與個股深度同一套排版器）*/
+#panes.masonry{display:flex;gap:var(--gap-md);align-items:flex-start}
+#panes.masonry > .mcol{flex:1;min-width:0}
+.pane{margin-bottom:var(--gap-md)}
+/* 圓角跟其他頁的 .card／.panel 一致（--r-md）。
+   原本用 --r-lg(12px)，切到這頁時卡片輪廓會明顯比別頁圓。 */
+.term{background:var(--card);border-radius:var(--r-md);padding:14px 16px}
+.term h3{font-size:var(--fs-lg);color:var(--purple);margin-bottom:2px}
+.term .full{font-size:var(--fs-tiny);color:var(--muted);margin-bottom:8px}
+/* 白話區塊：最顯眼，看不懂術語的人只需要讀這段 */
+.plain{background:var(--raised);border-left:3px solid var(--purple);
+  border-radius:var(--r-sm);padding:10px 12px;margin-bottom:10px;
+  font-size:var(--fs-md);line-height:1.85}
+.plain b{color:var(--purple)}
+.term .desc{font-size:var(--fs-sm);color:var(--sub);line-height:1.75;margin-bottom:10px}
+.term ul{list-style:none;padding:0;margin:0 0 8px}
+.term li{font-size:var(--fs-sm);line-height:1.7;padding:2px 0;color:var(--text)}
+.term li::before{content:"▸ ";color:var(--purple)}
+.term .rel{margin-top:8px;display:flex;gap:5px;flex-wrap:wrap}
+.term .rel a{font-size:var(--fs-tiny);background:var(--border);color:var(--blue);
+  border-radius:var(--r-sm);padding:2px 8px;cursor:pointer}
+.term .rel a:hover{background:var(--border-hi)}
+.cat-tag{font-size:var(--fs-micro);background:var(--border);color:var(--muted);
+  border-radius:var(--r-sm);padding:1px 7px;margin-left:6px;vertical-align:middle}
+.loading{padding:40px}
+mark{background:#4a4020;color:var(--yellow);border-radius:2px}
+</style>
+<script src="./assets/tq.js?v=2026090106"></script>
+<script src="./assets/graph.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+<div class="topbar">
+  <span class="brand">台股量化</span>
+  <div class="nav">
+    <a href="./index.html">總覽</a>
+    <a href="./market.html">市場結構</a>
+    <a href="./network.html">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330">個股深度</a>
+    <a href="./analytics.html">模型績效</a>
+    <a href="./learn.html" class="on">名詞解說</a>
+  </div>
+  <input id="q" class="inp" placeholder="搜尋名詞（例：t值、超額報酬、RSI）" oninput="onSearch()">
+  <span class="theme-sw" id="themeSw"></span>
+</div>
+
+<h1>名詞解說</h1>
+<div class="sub">看不懂的術語都在這裡。每一條最上面的<b style="color:var(--purple)">🗣 白話說</b>是給人看的，下面才是完整定義。</div>
+
+<div id="cats"></div>
+<div id="wrap">
+  <div id="mapCol">
+    <div id="mapBox">
+      <div class="hd"><span>🧠 關聯圖</span>
+        <span style="display:flex;gap:4px">
+        <button class="btn" style="font-size:var(--fs-tiny);padding:3px 8px"
+                onclick="mapHome()">回總覽</button>
+        <button class="btn on" style="font-size:var(--fs-tiny);padding:3px 8px"
+                onclick="openNet()">🌐 完整網路</button></span></div>
+      <div class="hint" id="mapHint">點分類或名詞看它的關聯</div>
+      <svg id="map" viewBox="0 0 300 300"></svg>
+    </div>
+  </div>
+  <div id="panes"><div class="loading">載入中...</div></div>
+</div>
+
+<div id="netWrap">
+  <div id="netBar">
+    <h2>🌐 名詞關聯網路</h2>
+    <span class="hint" id="netStat">計算版面中…</span>
+    <div id="netLegend"></div>
+    <span style="flex:1"></span>
+    <button class="btn" onclick="netG&&netG.reset()">重置視角</button>
+    <button class="btn" onclick="closeNet()">✕ 關閉</button>
+  </div>
+  <div id="net"></div>
+  <div class="hint" style="margin-top:6px;font-size:var(--fs-tiny);color:var(--muted)">
+    滑鼠移到節點上 → 只亮出它的關聯｜點節點 → 看該名詞解說｜
+    拖曳節點可搬動、拖曳空白處平移、滾輪縮放（放大後所有標籤都會顯示）｜
+    圓圈越大＝關聯越多｜點上方分類色籤可只看該分類
+  </div>
+</div>
+
+<script>
+let ALL = [], CATS = [], cur = "全部", kw = "";
+
+async function load(){
+  const d = await TQ.api('/api/glossary');
+  if(d._error){ TQ.html('panes','<div class="loading">載入失敗：'+TQ.esc(d._error)+'</div>'); return; }
+  ALL = d.terms; CATS = d.categories;
+  document.getElementById('cats').innerHTML =
+    ['全部', ...CATS].map(c =>
+      `<button class="btn${c===cur?' on':''}" onclick="pick('${c}')">${c}`
+      + `<span class="cat-tag">${c==='全部'?ALL.length:ALL.filter(t=>t.category===c).length}</span>`
+      + `</button>`).join('');
+  buildGraph();
+  render();
+  drawMap(null);
+}
+
+function pick(c){
+  cur = c;
+  document.querySelectorAll('#cats .btn').forEach(b =>
+    b.classList.toggle('on', b.textContent.startsWith(c)));
+  render();
+}
+
+let _t;
+function onSearch(){
+  clearTimeout(_t);
+  _t = setTimeout(() => { kw = document.getElementById('q').value.trim(); render(); }, 200);
+}
+
+// 詞條內文用 **粗體** 標重點（資料由我們自己維護，非使用者輸入）。
+// 順序很重要：先 HTML 跳脫 → 再轉粗體 → 最後標搜尋高亮。
+// 這樣既不會把資料當成 HTML 執行，星號也不會直接印在畫面上。
+function md(escaped){
+  return escaped.replace(/\*\*(.+?)\*\*/g, '<b style="color:var(--text)">$1</b>');
+}
+function hl(s){
+  const base = md(TQ.esc(s));
+  if(!kw) return base;
+  return base.replace(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi'),
+                      m => `<mark>${m}</mark>`);
+}
+
+function render(){
+  let list = ALL;
+  if(cur !== '全部') list = list.filter(t => t.category === cur);
+  if(kw){
+    const k = kw.toLowerCase();
+    list = list.filter(t => t.term.toLowerCase().includes(k)
+      || t.full_name.toLowerCase().includes(k)
+      || (t.short_desc||'').includes(kw) || (t.plain||'').includes(kw));
+  }
+  if(!list.length){
+    TQ.html('panes', `<div class="loading">找不到「${TQ.esc(kw)}」相關名詞</div>`);
+    return;
+  }
+  // 有白話解釋的排前面 —— 那些通常是最需要解釋的
+  list = [...list].sort((a,b) => (b.plain?1:0) - (a.plain?1:0));
+
+  document.getElementById('panes').innerHTML = list.map(t => `
+    <div class="pane"><div class="term">
+      <h3>${hl(t.term)}<span class="cat-tag">${t.category}</span></h3>
+      <div class="full">${hl(t.full_name)}</div>
+      ${t.plain ? `<div class="plain">🗣 <b>白話說</b>：${hl(t.plain)}</div>` : ''}
+      ${t.short_desc ? `<div class="desc">${hl(t.short_desc)}</div>` : ''}
+      ${t.detail ? `<div class="desc">${hl(t.detail)}</div>` : ''}
+      ${t.points && t.points.length
+        ? `<ul>${t.points.map(p => `<li>${hl(p)}</li>`).join('')}</ul>` : ''}
+      ${t.related && t.related.length
+        ? `<div class="rel">${t.related.map(r =>
+            `<a onclick="jump('${TQ.esc(r)}')">${TQ.esc(r)}</a>`).join('')}</div>` : ''}
+    </div></div>`).join('');
+  TQMasonry.reset('panes');   // 每次搜尋都重建 DOM，舊快取必須丟掉
+  relayout();
+
+  // 篩到只剩一條時，心智圖自動以它為中心；否則回總覽
+  if(list.length === 1) drawMap(list[0].term);
+}
+
+// ══════════════════════════════════════════════════════════
+// 心智圖（關聯圖）
+// ══════════════════════════════════════════════════════════
+// 為什麼是「局部圖」而不是全圖：
+//   實測 104 節點／273 條邊、平均連線 5.2、最高 15（EPS）。
+//   全圖擠在 330px 側欄會變成看不懂的毛球。
+//   但單一詞條的鄰居數中位數只有 4 —— 以它為中心放射排開剛剛好。
+// related 是單向寫的，但關聯本質雙向，所以建圖時補上反向邊。
+const ADJ = {};
+function buildGraph(){
+  ALL.forEach(t => ADJ[t.term] = ADJ[t.term] || new Set());
+  ALL.forEach(t => (t.related||[]).forEach(r => {
+    if(!ADJ[r]) return;
+    ADJ[t.term].add(r);
+    ADJ[r].add(t.term);      // 補反向：A 說跟 B 有關，B 也該連回 A
+  }));
+}
+
+const CAT_COLOR = {
+  '模型評估':'--purple', '技術指標':'--blue',   '籌碼面':'--orange',
+  '基本面':'--green',    '估值':'--yellow',     'K線形態':'--red',
+  '風控':'--red',        '策略':'--green',      '消息面':'--sub',
+};
+const catOf = t => (ALL.find(x => x.term === t) || {}).category || '其他';
+const colorOf = t => `var(${CAT_COLOR[catOf(t)] || '--muted'})`;
+
+const SVG = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, txt){
+  const n = document.createElementNS(SVG, tag);
+  for(const k in attrs) n.setAttribute(k, attrs[k]);
+  if(txt != null) n.textContent = txt;
+  return n;
+}
+
+/** 截短標籤，避免長詞把圖撐爛 */
+const short = (s, n) => s.length > n ? s.slice(0, n-1) + '…' : s;
+
+function drawMap(center){
+  const svg = document.getElementById('map');
+  if(!svg) return;
+  svg.innerHTML = '';
+  const W = 300, H = 300, cx = W/2, cy = H/2;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  if(!center){ drawCatMap(svg, W, H); return; }
+
+  const nb = [...(ADJ[center] || [])];
+  document.getElementById('mapHint').textContent =
+    nb.length ? `${center} 的 ${nb.length} 個關聯（點圓圈跳過去）`
+              : `${center} 目前沒有關聯名詞`;
+
+  // 鄰居越多 → 半徑越「小」、字越短。
+  // 直覺會想把半徑拉大來分散節點，但實測 EPS（15 個鄰居）時
+  // r=112 會讓最右邊的標籤衝出 300px 畫布（除權息、訂單能見度）。
+  // 標籤是往圓圈外側再推 16px 畫的，所以半徑必須留出標籤的空間。
+  const many = nb.length > 9;
+  const r  = many ? 94 : nb.length > 5 ? 104 : 92;
+  const fs = many ? 9.5 : 11.5;
+  const maxLen = many ? 4 : 5;
+
+  nb.forEach((t, i) => {
+    const a = -Math.PI/2 + i * 2*Math.PI / nb.length;   // 從正上方開始排
+    const x = cx + r*Math.cos(a), y = cy + r*Math.sin(a);
+    svg.appendChild(el('line', {class:'edge', x1:cx, y1:cy, x2:x, y2:y}));
+
+    const g = el('g', {class:'node'});
+    g.appendChild(el('circle', {cx:x, cy:y, r:12,
+      fill:'var(--raised)', stroke:colorOf(t), 'stroke-width':1.6}));
+    // 標籤放在圓圈外側，左右半邊各自對齊，才不會壓到中心
+    const right = Math.cos(a) >= 0;
+    const lbl = el('text', {class:'lbl', x: x + (right ? 16 : -16), y: y + 3.5,
+      'text-anchor': right ? 'start' : 'end', style:`font-size:${fs}px`},
+      short(t, maxLen));
+    g.appendChild(lbl);
+    g.addEventListener('click', () => jump(t));
+    g.appendChild(el('title', {}, t));       // hover 顯示完整名稱
+    svg.appendChild(g);
+  });
+
+  // 中心節點最後畫，蓋在連線之上
+  const gc = el('g');
+  gc.appendChild(el('circle', {cx, cy, r:26, fill:'var(--card)',
+    stroke:colorOf(center), 'stroke-width':2.4}));
+  gc.appendChild(el('text', {class:'lbl-c', x:cx, y:cy+1,
+    'text-anchor':'middle'}, short(center, 5)));
+  gc.appendChild(el('text', {class:'cnt', x:cx, y:cy+13,
+    'text-anchor':'middle'}, catOf(center)));
+  gc.appendChild(el('title', {}, center));
+  svg.appendChild(gc);
+}
+
+/** 沒有選定詞條時：畫分類總覽，點了就篩選 */
+function drawCatMap(svg, W, H){
+  const cx = W/2, cy = H/2;
+  document.getElementById('mapHint').textContent =
+    '九大分類（點一下篩選）';
+  const cats = CATS.filter(c => ALL.some(t => t.category === c));
+  const r = 108;
+  cats.forEach((c, i) => {
+    const a = -Math.PI/2 + i * 2*Math.PI / cats.length;
+    const x = cx + r*Math.cos(a), y = cy + r*Math.sin(a);
+    svg.appendChild(el('line', {class:'edge', x1:cx, y1:cy, x2:x, y2:y}));
+    const n = ALL.filter(t => t.category === c).length;
+    const g = el('g', {class:'node'});
+    g.appendChild(el('circle', {cx:x, cy:y, r:15,
+      fill:'var(--raised)', stroke:`var(${CAT_COLOR[c]||'--muted'})`, 'stroke-width':1.8}));
+    g.appendChild(el('text', {class:'cnt', x:x, y:y+3, 'text-anchor':'middle',
+      style:'font-size:11.5px;fill:var(--text)'}, String(n)));
+    const right = Math.cos(a) >= 0;
+    g.appendChild(el('text', {class:'lbl', x: x + (right ? 19 : -19), y: y + 3.5,
+      'text-anchor': right ? 'start' : 'end'}, c));
+    g.addEventListener('click', () => { kw=''; document.getElementById('q').value=''; pick(c); });
+    svg.appendChild(g);
+  });
+  const gc = el('g');
+  gc.appendChild(el('circle', {cx, cy, r:28, fill:'var(--card)',
+    stroke:'var(--purple)', 'stroke-width':2.4}));
+  gc.appendChild(el('text', {class:'lbl-c', x:cx, y:cy-1, 'text-anchor':'middle'},
+    String(ALL.length)));
+  gc.appendChild(el('text', {class:'cnt', x:cx, y:cy+11, 'text-anchor':'middle'}, '個名詞'));
+  svg.appendChild(gc);
+}
+
+function mapHome(){ drawMap(null); }
+
+// ══════════════════════════════════════════════════════════
+// 完整關聯網路（力導向圖）
+// ══════════════════════════════════════════════════════════
+// 側欄那張是「一個中心＋鄰居」的局部圖，看不到整張網路。
+// 這張把 104 個名詞、273 條連線一次攤開，所以佔滿整個畫面。
+// 實測跨分類邊佔 26%——分類上色後看得出哪些領域互相連結。
+let netG = null, netFilter = null;
+
+function openNet(){
+  const wrap = document.getElementById('netWrap');
+  wrap.classList.add('on');
+  document.body.style.overflow = 'hidden';
+
+  if(netG) return;                     // 已經建過就不重算版面
+
+  // 圖例（同時是分類篩選鈕）
+  document.getElementById('netLegend').innerHTML =
+    CATS.map(c => `<span class="lg" data-c="${c}" onclick="netPick('${c}')">
+      <i style="background:var(${CAT_COLOR[c]||'--muted'})"></i>${c}</span>`).join('');
+
+  const nodes = ALL.map(t => ({ id:t.term, label:t.term, group:t.category }));
+  const edges = [];
+  const seen = new Set();
+  ALL.forEach(t => (t.related||[]).forEach(r => {
+    if(!ADJ[r]) return;
+    // 去重：A→B 與 B→A 是同一條線，畫兩次會讓那條線看起來比較粗
+    const key = t.term < r ? t.term+' '+r : r+' '+t.term;
+    if(seen.has(key)) return;
+    seen.add(key);
+    edges.push([t.term, r]);
+  }));
+
+  const t0 = performance.now();
+  netG = TQGraph.create({
+    container: 'net', nodes, edges,
+    colorOf: g => `var(${CAT_COLOR[g] || '--muted'})`,
+    onSelect: id => { closeNet(); jump(id); },
+  });
+  document.getElementById('net').addEventListener('tqg:settled', ev => {
+    document.getElementById('netStat').textContent =
+      `${nodes.length} 個名詞・${edges.length} 條關聯（版面計算 ${ev.detail.ms}ms）`;
+  }, { once:true });
+}
+
+function closeNet(){
+  document.getElementById('netWrap').classList.remove('on');
+  document.body.style.overflow = '';
+}
+
+function netPick(c){
+  netFilter = (netFilter === c) ? null : c;   // 再點一次取消
+  document.querySelectorAll('#netLegend .lg').forEach(e =>
+    e.classList.toggle('off', netFilter && e.dataset.c !== netFilter));
+  netG && netG.filter(netFilter);
+}
+
+document.addEventListener('keydown', e => {
+  if(e.key === 'Escape') closeNet();
+});
+
+function jump(term){
+  document.getElementById('q').value = term;
+  kw = term; cur = '全部';
+  document.querySelectorAll('#cats .btn').forEach(b =>
+    b.classList.toggle('on', b.textContent.startsWith('全部')));
+  render();
+  drawMap(term);                      // 心智圖跟著跳到新的中心
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+// 分欄：詞條長短差很多，用與個股深度同一套貪婪磚牆
+function relayout(){ return TQMasonry.auto('panes', [[2600,4],[1700,3],[1100,2],[0,1]]); }
+
+let _rsz, _lastW = 0;
+function onResize(){
+  clearTimeout(_rsz);
+  _rsz = setTimeout(() => {
+    if(Math.abs(window.innerWidth - _lastW) < 2) return;
+    _lastW = window.innerWidth; relayout();
+  }, 300);
+}
+window.addEventListener('resize', onResize);
+if(window.ResizeObserver) new ResizeObserver(onResize).observe(document.documentElement);
+
+// 支援 /learn?t=t值 直接跳到某條
+const p = new URLSearchParams(location.search).get('t');
+load().then(() => { if(p) jump(p); _lastW = window.innerWidth; });
+</script></body></html>

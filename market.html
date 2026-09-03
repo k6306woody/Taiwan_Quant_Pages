@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>市場結構 — 台股量化系統</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<style>
+/* ── 大盤層：三個並排的量化指標 ── */
+#mkt{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+  gap:var(--gap-md);margin-bottom:var(--gap-md)}
+.stat{background:var(--card);border-radius:var(--r-lg);padding:14px 16px}
+.stat .lab{font-size:var(--fs-tiny);color:var(--muted);letter-spacing:.04em}
+.stat .big{font-size:var(--fs-2xl);font-weight:600;letter-spacing:-.02em;
+  margin:2px 0 6px}
+
+/* 廣度條：漲跌家數用長度表達，不用數字硬記 */
+.breadth{display:flex;height:6px;border-radius:3px;overflow:hidden;
+  background:var(--raised)}
+.breadth i{display:block;height:100%}
+.legend{display:flex;gap:10px;font-size:var(--fs-micro);color:var(--muted);
+  margin-top:6px}
+.legend b{font-weight:600}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+  margin-right:3px;vertical-align:middle}
+
+/* ── 泡泡圖 ── */
+#bubbleWrap{background:var(--card);border-radius:var(--r-lg);
+  padding:16px;margin-bottom:var(--gap-md)}
+#bubble{width:100%;height:auto;display:block;touch-action:none}
+.bub{cursor:pointer;transition:opacity .15s}
+.bub:hover circle{stroke-width:2.5}
+#bubble text{pointer-events:none;font-family:var(--font-ui)}
+/* 字級跟著畫布的視覺倍率 --s（由 drawBubbles 設在 svg 上）。
+   寫死 px 的話，大螢幕上圖被放大、只有這兩種字沒跟著長。 */
+.quad-lab{font-size:calc(12px * var(--s,1));fill:var(--faint);
+  letter-spacing:.05em}
+.axis-lab{font-size:calc(12px * var(--s,1));fill:var(--muted)}
+
+/* ── 產業明細 ── */
+#detail{background:var(--card);border-radius:var(--r-lg);padding:16px}
+.ind-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  margin-bottom:var(--gap-md)}
+.ind-h .n{font-size:var(--fs-xl);font-weight:600;letter-spacing:-.01em}
+.chip{font-size:var(--fs-micro);background:var(--raised);color:var(--sub);
+  padding:2px 8px;border-radius:99px}
+
+/* 供應鏈：上游 / 本身 / 下游 三欄 */
+#chain{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  gap:var(--gap-md);margin-top:var(--gap-md)}
+.chain-col{background:var(--raised);border-radius:var(--r-md);padding:12px 14px}
+.chain-col h4{font-size:var(--fs-tiny);color:var(--muted);letter-spacing:.06em;
+  margin-bottom:8px;font-weight:600}
+.chain-col .grp{font-size:var(--fs-micro);color:var(--sub);margin-bottom:6px}
+.chain-col .grp b{color:var(--text);font-weight:600;display:block;
+  margin-bottom:2px}
+
+.cov{font-size:var(--fs-micro);color:var(--muted);margin-top:var(--gap-md);
+  line-height:1.6}
+</style>
+<script src="./assets/tq.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+
+<div class="topbar">
+  <span class="brand">台股量化</span>
+  <div class="nav">
+    <a href="./index.html">總覽</a>
+    <a href="./market.html" class="on">市場結構</a>
+    <a href="./network.html">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330">個股深度</a>
+    <a href="./analytics.html">模型績效</a>
+    <a href="./learn.html">名詞解說</a>
+  </div>
+  <span class="theme-sw" id="themeSw"></span>
+</div>
+
+<h1>市場結構</h1>
+<div class="sub" id="sub">由大到小：大盤 → 產業 → 上下游 → 個股</div>
+
+<div id="mkt"><div class="loading">載入中…</div></div>
+
+<div id="bubbleWrap">
+  <div class="panel-h" style="margin-bottom:10px">
+    <b>產業定位</b>
+    <span>
+      <button class="btn on" id="by-official" onclick="setMode('official')">官方分類</button>
+      <button class="btn" id="by-theme" onclick="setMode('theme')">主題分類</button>
+      <button class="btn" id="vw-quad" onclick="setView('quad')" style="margin-left:14px">四象限</button>
+      <button class="btn on" id="vw-chain" onclick="setView('chain')">鏈上分段</button>
+    </span>
+  </div>
+  <div style="font-size:var(--fs-micro);color:var(--muted);margin-bottom:6px"
+       id="bubbleHint"></div>
+  <svg id="bubble" viewBox="0 0 900 460" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+
+<div id="detail"><div class="loading">點上方泡泡看產業明細</div></div>
+
+<div class="cov" id="cov"></div>
+
+<script>
+let TREE = null, CUR = null, MODE = 'official', VIEW = 'chain';
+
+/* 兩種橫軸，量的是完全不同的東西：
+
+     quad   橫軸＝當日均漲跌。看「今天誰在動」。
+     chain  橫軸＝鏈上位置（上游→末端）。看「這一波是上游在漲還是
+            下游在漲」——同一個產業裡也分前後端，這正是使用者問的
+            問題，而四象限圖答不出來（它把整條鏈揉成一團）。
+
+   ⚠ chain 檢視的橫軸是**類別層級的位置判定**，不是個股供應鏈。
+     說明列會把這件事寫出來，不能只寫「上下游」讓人以為系統知道
+     誰賣給誰。 */
+function setView(v) {
+  if (VIEW === v) return;
+  VIEW = v;
+  TQ.el('vw-quad').classList.toggle('on', v === 'quad');
+  TQ.el('vw-chain').classList.toggle('on', v === 'chain');
+  if (TREE) drawBubbles(TREE.industries.filter(i => !i.empty));
+}
+
+/* 兩種分類法互補，不是替代：
+     官方分類  45 類、涵蓋 68/70 檔——看結構
+     主題分類  10 類、涵蓋 36/70 檔——AI伺服器、電動車綠能這種
+               跨產業題材，官方分類切不出來，看輪動用
+   預設官方，因為這頁的重點是看全貌。 */
+function setMode(m) {
+  if (MODE === m) return;
+  MODE = m;
+  TQ.el('by-official').classList.toggle('on', m === 'official');
+  TQ.el('by-theme').classList.toggle('on', m === 'theme');
+  load();
+}
+
+async function load() {
+  const d = await TQ.api('/api/insight_tree?by=' + MODE);
+  if (d._error || !d.industries) {
+    TQ.html('mkt', '<div class="loading">載入失敗</div>'); return;
+  }
+  TREE = d;
+  TQ.html('sub', `由大到小：大盤 → 產業 → 上下游 → 個股　·　資料日 ${d.date}`);
+  renderMarket(d.market);
+  drawBubbles(d.industries.filter(i => !i.empty));
+  TQ.html('cov', coverageText(d));
+  const first = d.industries.find(i => !i.empty);
+  if (first) pick(first.name);
+}
+
+/* ── 第一層：大盤 ─────────────────────────────────────── */
+function renderMarket(m) {
+  const b = m.breadth, s = m.signals, t = b.total || 1;
+  const pct = n => (n / t * 100).toFixed(0) + '%';
+  TQ.html('mkt', `
+    <div class="stat">
+      <div class="lab">市場狀態</div>
+      <div class="big">${TQ.esc(m.regime.label || '—')}</div>
+      <div class="legend">
+        <span>加權 <b>${TQ.num(m.regime.cur, 0)}</b></span>
+        <span>MA20 <b>${TQ.num(m.regime.ma20, 0)}</b></span>
+        <span>MA60 <b>${TQ.num(m.regime.ma60, 0)}</b></span>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="lab">市場廣度</div>
+      <div class="big">${b.up} <span style="font-size:var(--fs-md);
+        color:var(--muted);font-weight:400">漲 / ${b.down} 跌</span></div>
+      <div class="breadth">
+        <i style="width:${pct(b.up)};background:var(--green)"></i>
+        <i style="width:${pct(b.flat)};background:var(--faint)"></i>
+        <i style="width:${pct(b.down)};background:var(--red)"></i>
+      </div>
+      <div class="legend"><span>共 ${t} 檔有訊號</span></div>
+    </div>
+    <div class="stat">
+      <div class="lab">訊號分佈</div>
+      <div class="big" style="color:var(--green)">${s.BUY} <span
+        style="font-size:var(--fs-md);color:var(--muted);font-weight:400">檔買進</span></div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--green)"></i>BUY <b>${s.BUY}</b></span>
+        <span><i class="dot" style="background:var(--yellow)"></i>HOLD <b>${s.HOLD}</b></span>
+        <span><i class="dot" style="background:var(--red)"></i>SELL <b>${s.SELL}</b></span>
+      </div>
+    </div>`);
+}
+
+/* ── 第二層：產業泡泡圖 ───────────────────────────────────
+   位置本身要有意義，不能只是好看。四個象限各代表一種處境：
+
+     左上 訊號強但在跌 → 潛在進場（或訊號與價格背離，要查）
+     右上 訊號強且在漲 → 順勢
+     左下 訊號弱且在跌 → 弱勢
+     右下 訊號弱但在漲 → 追高風險
+
+   所以象限標籤是圖的一部分，不是裝飾。                     */
+/* 標籤排開：**只移動標籤，不移動泡泡**。
+
+   泡泡的位置編碼了「當日漲跌 × 綜合分」——移動它等於竄改資料。
+   （這跟名詞關聯網路圖不同：那裡的座標是佈局演算法的產物，本身沒有
+   意義，所以可以自由推開。）
+
+   所以重疊時把標籤往上下挪，並畫一條細引線指回它真正的泡泡。 */
+function placeLabels(inds, POS, R, S = 1, W = 900, H = 460, extraCost = null) {
+  const items = inds.map(i => {
+    const { x: cx, y: cy } = POS(i);
+    return {i, cx, cy, r: R(i.volume), lx: cx, ly: cy - 1, moved: false};
+  });
+
+  /* 標籤佔位：兩行字，寬度**跟著產業名的長度走**。
+     原本固定 46px，但「電腦及週邊設備業」有 8 個字、寬度是
+     「光電業」的兩倍多——用同一個寬度判定，長名稱一定會壓到別人。 */
+  const CH = 13 * S;                       // 一個中文字大約的寬度
+  /* 第二行（「N 檔 · M 買」）只有大泡泡才顯示。
+     41 個產業全部畫兩行，光是文字就佔掉畫布一大塊——小泡泡的
+     檔數本來就可以靠 hover 的 tooltip 看，不必一直佔位。 */
+  const twoLine = it => it.r >= 14 * S;
+  const box = it => ({
+    w: Math.max(String(it.i.name).length * CH, 42 * S),
+    h: (twoLine(it) ? 28 : 15) * S,
+  });
+  const overlapRect = (ax, ay, aw, ah, bx, by, bw, bh) =>
+    Math.abs(ax - bx) < (aw + bw) / 2 && Math.abs(ay - by) < (ah + bh) / 2;
+
+  /* 排名大的（泡泡大、成分股多）先放，它最需要看得見；
+     小的後放，被擠到旁邊的代價比較小。 */
+  const order = [...items].sort((a, b) => b.r - a.r);
+
+  /* 候選位置：先試泡泡正上方（最自然），不行就往右、左、下，
+     再不行就拉遠。使用者要的「拉一條線註記在旁邊」就是後面這些。 */
+  // 16 個方向 × 7 段距離 = 112 個候選位置。密度不夠的話，41 個泡泡
+  // 擠在一起時每個候選都撞得到東西，只能挑「比較不糟」的那個——
+  // 實測 10 個方向 × 5 段時仍有 14 個標籤壓在別人的泡泡上。
+  const dirs = [];
+  for (let k = 0; k < 16; k++) {
+    const a = (k / 16) * Math.PI * 2 - Math.PI / 2;   // 從正上方開始繞
+    dirs.push([Math.cos(a), Math.sin(a)]);
+  }
+  const placed = [];
+
+  for (const it of order) {
+    const b = box(it);
+    let best = null, bestCost = Infinity;
+
+    for (const dist of [0, 0.8, 1.4, 2.2, 3.2, 4.5, 6]) {
+      for (const [dx, dy] of (dist === 0 ? [[0, -1]] : dirs)) {
+        // dist=0 是「就放在泡泡上方」；其餘往外推，推越遠成本越高
+        const gap = it.r + b.h * 0.6 + dist * 16 * S;
+        const lx = it.cx + (dist === 0 ? 0 : dx * gap);
+        const ly = it.cy + (dist === 0 ? -(it.r + b.h * 0.5) : dy * gap);
+
+        // 出界的直接淘汰——標籤被裁掉比擋到泡泡更糟
+        if (lx - b.w / 2 < 4 || lx + b.w / 2 > W - 4) continue;
+        if (ly - b.h / 2 < 4 || ly + b.h / 2 > H - 4) continue;
+
+        let cost = dist * 4;
+        // 壓到**任何**泡泡都要重罰。這是舊版沒做的事：它只比對
+        // 標籤與標籤，所以標籤大剌剌蓋在別人的圓上。
+        for (const o of items) {
+          const ddx = Math.max(Math.abs(lx - o.cx) - b.w / 2, 0);
+          const ddy = Math.max(Math.abs(ly - o.cy) - b.h / 2, 0);
+          if (Math.hypot(ddx, ddy) < o.r) cost += 100;
+        }
+        // 壓到已經放好的標籤
+        for (const p of placed) {
+          if (overlapRect(lx, ly, b.w, b.h, p.lx, p.ly, p.w, p.h)) cost += 70;
+        }
+        // 檢視特有的成本（鏈上分段：標籤不可以跑到別的分段裡去）。
+        // 這張圖的重點就是「它在哪一段」，標籤落在隔壁段等於講錯話。
+        if (extraCost) cost += extraCost(it, lx, ly, b);
+        if (cost < bestCost) { bestCost = cost; best = { lx, ly, dist }; }
+        if (cost === 0) break;
+      }
+      if (bestCost === 0) break;
+    }
+
+    if (best) {
+      it.lx = best.lx; it.ly = best.ly;
+      // 只有真的被推離泡泡才畫引線，不然每個標籤都拖一條線更亂
+      it.moved = best.dist > 0;
+    }
+    it.twoLine = twoLine(it);
+    placed.push({ lx: it.lx, ly: it.ly, w: b.w, h: b.h });
+  }
+  return items;
+}
+
+/* 畫布座標 = 實際像素，縮放倍率鎖在 1。
+
+   為什麼：原本 viewBox 寫死 900×460，卻用 width:100% 拉滿容器。
+   在 3440 的螢幕上容器約 3300px 寬 —— **整張圖被放大 3.7 倍**，
+   11px 的說明字變成 40px、13px 的產業名變成 48px。使用者的回報是
+   「字很大很好但有點過猶不及」，根因就是這個沒人設定過的倍率。
+
+   改成 viewBox 跟著容器的實際像素走，倍率固定為 1，字級就等於它
+   寫的數字。但這樣在大螢幕上又會顯得太小、泡泡也太稀疏，所以另外
+   給一個**有上限的**視覺倍率 S：以 900px 為基準，最多放到 1.6 倍。
+   使用者要的是「大一點」，不是「跟著螢幕無限放大」。 */
+function canvasBox() {
+  const wrap = TQ.el('bubbleWrap');
+  const raw = Math.round(wrap.clientWidth - 32);                // 扣 padding
+  /* 手機（容器 < 560px）不要再撐到 560。
+
+     撐大之後 `preserveAspectRatio="meet"` 會把整張圖縮回容器寬度——
+     倍率變成 0.61，寫著 12px 的字實際只有 7px。這正是註解上面講的
+     那個「沒人設定過的倍率」，只是方向相反。
+
+     改成吃真實寬度，並把高度拉成**直式**：五個分段在 343px 寬裡
+     排不成五欄（每欄 60px，欄名互相疊住），排成五條橫帶就讀得了。*/
+  const narrow = raw < 560;
+  const w = narrow ? Math.max(280, raw) : Math.max(560, raw);
+  const h = narrow
+    ? Math.round(Math.min(820, Math.max(520, w * 1.9)))
+    : Math.round(Math.min(760, Math.max(420, w * 0.42)));
+  return { w, h, s: narrow ? 1 : Math.min(1.6, Math.max(1, w / 900)) };
+}
+
+function drawBubbles(inds) {
+  const box = canvasBox();
+  const W = box.w, H = box.h, S = box.s;
+  const PAD = {t: 30 * S, r: 30 * S, b: 44 * S, l: 56 * S};
+  const svg = TQ.el('bubble');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.setProperty('--s', S);          // 給 .quad-lab / .axis-lab 用
+  if (!inds.length) { svg.innerHTML = ''; return; }
+
+  const xs = inds.map(i => i.avg_chg), ys = inds.map(i => i.avg_score);
+  // 軸範圍對稱於 0，這樣「零線」永遠在正中央，象限才讀得出來
+  const xm = Math.max(0.5, ...xs.map(Math.abs)) * 1.25;
+  const ym = Math.max(0.1, ...ys.map(Math.abs)) * 1.25;
+  const vmax = Math.max(...inds.map(i => i.volume), 1);
+
+  const X = v => PAD.l + (v + xm) / (2 * xm) * (W - PAD.l - PAD.r);
+  const Y = v => PAD.t + (ym - v) / (2 * ym) * (H - PAD.t - PAD.b);
+
+  /* 鏈上分段檢視：橫軸換成鏈上位置。
+     同一欄裡的泡泡沿 x 微幅錯開——它們的 x 本來就相同（同一段），
+     不錯開的話全部疊在一條直線上，大泡泡會把小的完全蓋掉。
+     錯開量刻意小於欄寬的一半，不會讓人誤以為 x 有連續意義。 */
+  const stages = ((TREE && TREE.coverage && TREE.coverage.stages) || [])
+    .slice().sort((a, b) => a.order - b.order);
+  const used = new Set(inds.map(i => i.stage_order == null ? 4 : i.stage_order));
+  const cols = stages.filter(s => used.has(s.order));
+  const colIdx = new Map(cols.map((s, k) => [s.order, k]));
+  /* 手機是 375px：五欄各只有 60px，欄名會互相疊在一起，泡泡也擠成
+     一條。畫布是直的時候就把分段疊成**橫帶**——順序沒變，只是換一個
+     軸，而且這樣 x 軸空出來還給「分數」，兩個維度都保得住。 */
+  const VERT = H > W * 0.95;
+  const nc = Math.max(1, cols.length);
+  const cw = ((VERT ? H - PAD.t - PAD.b : W - PAD.l - PAD.r)) / nc;
+  const jit = new Map();
+  cols.forEach(s => jit.set(s.order, 0));
+  // 同一段裡的泡泡沿「厚度方向」交錯，不然它們的座標完全相同、
+  // 大泡泡會把小的整個蓋掉。錯開量小於半個帶寬，不會讓人誤讀成
+  // 這個軸有連續意義。
+  const band = i => {
+    const o = i.stage_order == null ? 4 : i.stage_order;
+    const k = colIdx.has(o) ? colIdx.get(o) : 0;
+    const n = jit.get(o) || 0;
+    jit.set(o, n + 1);
+    const off = (n % 2 ? 1 : -1) * Math.ceil(n / 2) * (cw * 0.16);
+    const base = (VERT ? PAD.t : PAD.l) + cw * (k + 0.5);
+    return base + Math.max(-cw * 0.34, Math.min(cw * 0.34, off));
+  };
+  const chain = VIEW === 'chain' && cols.length >= 2;
+  const XSCORE = v => PAD.l + (v + ym) / (2 * ym) * (W - PAD.l - PAD.r);
+  const posCache = new Map();
+  const POS = i => {
+    if (!posCache.has(i.name)) {
+      posCache.set(i.name,
+        !chain ? { x: X(i.avg_chg), y: Y(i.avg_score) }
+        : VERT ? { x: XSCORE(i.avg_score), y: band(i) }
+               : { x: band(i), y: Y(i.avg_score) });
+    }
+    return posCache.get(i.name);
+  };
+  TQ.html('bubbleHint', chain
+    ? '橫軸＝<b>鏈上位置</b>（上游→末端，<b>類別層級</b>的判定，不是個股供應鏈）'
+      + '　縱軸＝均綜合分　泡泡大小＝成交量　顏色＝買進比例　點擊鑽取'
+    : '橫軸＝當日均漲跌　縱軸＝均綜合分　泡泡大小＝成交量　顏色＝買進比例　點擊鑽取');
+  // 面積正比於成交量（不是半徑）——半徑正比會誇大差距。
+  // 範圍刻意收斂（10~32 而非 14~48）：實測原本的範圍讓半導體 r=48、
+  // 電動車綠能 r=42 疊了 58px，標籤完全讀不了。泡泡大小只是輔助資訊，
+  // 為它犧牲可讀性不划算。
+  const R = v => (10 + Math.sqrt(v / vmax) * 22) * S;
+
+  const x0 = X(0), y0 = Y(0);
+  const buyRatio = i => i.count ? i.signals.BUY / i.count : 0;
+  const color = i => {
+    const b = buyRatio(i);
+    if (b >= 0.5) return 'var(--green)';
+    if (b > 0)    return 'var(--yellow)';
+    return i.avg_score >= 0 ? 'var(--blue)' : 'var(--muted)';
+  };
+
+  const quad = chain ? [] : [
+    [PAD.l + 8,  PAD.t + 14, 'start', '訊號強 · 價在跌'],
+    [W - PAD.r - 8, PAD.t + 14, 'end',   '訊號強 · 價在漲'],
+    [PAD.l + 8,  H - PAD.b - 8, 'start', '訊號弱 · 價在跌'],
+    [W - PAD.r - 8, H - PAD.b - 8, 'end', '訊號弱 · 價在漲'],
+  ];
+
+  // 分段檢視的背板：交錯底色 + 欄名 + 欄與欄之間的方向箭頭。
+  // 箭頭畫在**欄與欄之間**，表達的是排序，不是「A 供貨給 B」。
+  const bands = !chain ? '' : cols.map((s, k) => {
+    if (VERT) {
+      const by = PAD.t + cw * k;
+      const ar = k < cols.length - 1
+        ? `<path d="M${PAD.l - 21} ${by + cw - 11} l5 7 l5 -7"
+                fill="none" stroke="var(--faint)" stroke-width="1.3"/>
+           <line x1="${PAD.l - 16}" y1="${by + cw - 24}" x2="${PAD.l - 16}"
+                y2="${by + cw - 6}" stroke="var(--faint)" stroke-width="1.1"/>` : '';
+      return (k % 2 ? `<rect x="0" y="${by}" width="${W}" height="${cw}"
+                   fill="var(--raised)" opacity=".33"/>` : '')
+        + `<text class="axis-lab" x="4" y="${by + 13}"
+                text-anchor="start">${s.label}</text>` + ar;
+    }
+    const bx = PAD.l + cw * k;
+    const arrow = k < cols.length - 1
+      ? `<path d="M${bx + cw - 7} ${PAD.t - 17} l7 5 l-7 5"
+              fill="none" stroke="var(--faint)" stroke-width="1.3"/>
+         <line x1="${bx + cw - 30}" y1="${PAD.t - 12}" x2="${bx + cw - 4}"
+              y2="${PAD.t - 12}" stroke="var(--faint)" stroke-width="1.1"/>` : '';
+    return (k % 2 ? `<rect x="${bx}" y="${PAD.t - 6}" width="${cw}"
+                 height="${H - PAD.t - PAD.b + 12}" fill="var(--raised)"
+                 opacity=".33"/>` : '')
+      + `<text class="axis-lab" x="${bx + cw / 2}" y="${PAD.t - 10}"
+              text-anchor="middle">${s.label}</text>` + arrow;
+  }).join('');
+
+  svg.innerHTML = bands + `
+    ${chain ? (VERT ? `<line x1="${XSCORE(0)}" y1="${PAD.t}" x2="${XSCORE(0)}"
+          y2="${H - PAD.b}" stroke="var(--border)" stroke-width="1"/>` : '')
+       : `<line x1="${x0}" y1="${PAD.t}" x2="${x0}" y2="${H - PAD.b}"
+          stroke="var(--border)" stroke-width="1"/>`}
+    ${chain && VERT ? '' : `<line x1="${PAD.l}" y1="${y0}" x2="${W - PAD.r}"
+          y2="${y0}" stroke="var(--border)" stroke-width="1"/>`}
+    ${quad.map(([x, y, a, t]) =>
+      `<text class="quad-lab" x="${x}" y="${y}" text-anchor="${a}">${t}</text>`).join('')}
+    ${chain ? '' : `<text class="axis-lab" x="${W - PAD.r}" y="${H - 14}"
+          text-anchor="end">當日均漲跌 →</text>`}
+    ${chain && VERT
+      ? `<text class="axis-lab" x="${W - PAD.r}" y="${H - 14}"
+              text-anchor="end">綜合分 →</text>`
+      : `<text class="axis-lab" x="${PAD.l - 8}" y="${PAD.t + 4}"
+              text-anchor="end">分數</text>`}
+    ${placeLabels(inds, POS, R, S, W, H, !chain ? null : (it, lx, ly, b) => {
+      // 標籤的中心必須留在自己這一段的帶子裡。180 比「壓到泡泡」的
+      // 100 還重——寧可蓋住一顆泡泡，也不要把產業標到錯的段。
+      const o = it.i.stage_order == null ? 4 : it.i.stage_order;
+      const k = colIdx.has(o) ? colIdx.get(o) : 0;
+      const lo = (VERT ? PAD.t : PAD.l) + cw * k;
+      const v = VERT ? ly : lx;
+      return (v < lo + 2 || v > lo + cw - 2) ? 180 : 0;
+    }).map(({i, cx, cy, r, lx, ly, moved, twoLine}) => {
+      /* 引線從**泡泡邊緣**拉到標籤邊緣，不是從圓心拉。
+         從圓心拉的話線會穿過泡泡本身，看起來像插了一根針。 */
+      const ang = Math.atan2(ly - cy, lx - cx);
+      const x1 = cx + Math.cos(ang) * r, y1 = cy + Math.sin(ang) * r;
+      const x2 = lx - Math.cos(ang) * 4, y2 = ly - Math.sin(ang) * 4;
+      return `<g class="bub" onclick="pick('${i.name}')">
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="${color(i)}" fill-opacity=".18"
+                stroke="${color(i)}" stroke-width="1.6"/>
+        ${moved ? `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"
+                        stroke="${color(i)}" stroke-width="1" stroke-opacity=".45"/>` : ''}
+        <text x="${lx}" y="${ly}" text-anchor="middle"
+              font-size="${(12.5 * S).toFixed(1)}" font-weight="600"
+              fill="var(--text)">${i.name}</text>
+        ${twoLine ? `<text x="${lx}" y="${ly + 13 * S}" text-anchor="middle"
+              font-size="${(11 * S).toFixed(1)}"
+              fill="var(--sub)">${i.count} 檔 · ${i.signals.BUY} 買</text>` : ''}
+        <title>${i.name}｜${i.count}/${i.total_members} 檔有訊號
+均綜合分 ${i.avg_score >= 0 ? '+' : ''}${i.avg_score.toFixed(3)}
+當日均漲跌 ${i.avg_chg >= 0 ? '+' : ''}${i.avg_chg}%
+鏈上位置 ${i.stage_label || '不分段'}
+BUY ${i.signals.BUY} · HOLD ${i.signals.HOLD} · SELL ${i.signals.SELL}</title>
+      </g>`;
+    }).join('')}`;
+}
+
+/* ── 第三、四層：產業明細 → 上下游 → 個股 ─────────────── */
+function pick(name) {
+  CUR = name;
+  const i = TREE.industries.find(x => x.name === name);
+  if (!i) return;
+
+  const rows = i.stocks.map(s => `
+    <tr onclick="location.href='/stock/${s.stock_id}'" style="cursor:pointer">
+      <td style="text-align:left"><b>${s.stock_id}</b>
+        <span style="color:var(--sub)">${TQ.esc(s.name)}</span></td>
+      <td>${TQ.num(s.close)}</td>
+      <td class="${TQ.signClass(s.chg_pct)}">${TQ.pctRaw(s.chg_pct)}</td>
+      <td class="${TQ.signClass(s.score)}">${TQ.signed(s.score, 3)}</td>
+      <td><span class="badge badge-${s.signal}">${s.signal}</span></td>
+      <td class="${TQ.signClass(s.tech)}">${TQ.signed(s.tech, 2)}</td>
+      <td class="${TQ.signClass(s.chip)}">${TQ.signed(s.chip, 2)}</td>
+    </tr>`).join('');
+
+  // 上下游：只有少數個股有資料，沒有就明說，不要留白讓人猜
+  const chains = i.stocks
+    .filter(s => TREE.supply_chain[s.stock_id])
+    .map(s => renderChain(s.stock_id, TREE.supply_chain[s.stock_id]));
+
+  TQ.html('detail', `
+    <div class="ind-h">
+      <span class="n">${i.name}</span>
+      <span class="chip">${i.count}/${i.total_members} 檔有訊號</span>
+      <span class="chip">均分 ${i.avg_score >= 0 ? '+' : ''}${i.avg_score.toFixed(3)}</span>
+      <span class="chip">均漲跌 ${i.avg_chg >= 0 ? '+' : ''}${i.avg_chg}%</span>
+      <span class="chip">買進 ${i.signals.BUY}</span>
+    </div>
+    <table class="tbl">
+      <thead><tr>
+        <th style="text-align:left">個股</th><th>收盤</th><th>漲跌</th>
+        <th>綜合</th><th>訊號</th><th>技術</th><th>籌碼</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${chains.length ? chains.join('') :
+      `<div class="cov" style="margin-top:14px">
+         這個產業目前沒有上下游資料。供應鏈對照表是人工維護的，
+         只涵蓋 ${Object.keys(TREE.supply_chain).length} 檔龍頭股。
+       </div>`}`);
+}
+
+function renderChain(sid, c) {
+  const col = (title, obj) => `
+    <div class="chain-col">
+      <h4>${title}</h4>
+      ${Object.entries(obj || {}).map(([k, v]) =>
+        `<div class="grp"><b>${TQ.esc(k)}</b>${TQ.esc(v.join('、'))}</div>`).join('')
+        || '<div class="grp">—</div>'}
+    </div>`;
+  return `
+    <div class="ind-h" style="margin-top:20px;margin-bottom:6px">
+      <span style="font-size:var(--fs-lg);font-weight:600">${sid} ${TQ.esc(c.name)} 供應鏈</span>
+    </div>
+    <div id="chain">
+      ${col('上游', c.upstream)}
+      ${col('下游', c.downstream)}
+    </div>`;
+}
+
+function coverageText(d) {
+  const c = d.coverage;
+  const extra = d.unclassified.length
+    ? `未分類 ${d.unclassified.length} 檔不在任何產業內——它們仍在總覽的行情表裡，只是這張圖看不到。`
+    : '所有有訊號的股票都已分類。';
+  return `${c.note}。<br>${extra}`;
+}
+
+/* 畫布尺寸跟著容器走，所以視窗變寬變窄都要重畫。
+   debounce 是必要的：拖視窗邊緣時每一格都重跑一次標籤排開
+   （24 回合 × n²）會卡住。 */
+let _rt = null, _lastW = 0;
+function redrawBubbles() {
+  if (!TREE || !TREE.industries) return;
+  drawBubbles(TREE.industries.filter(i => !i.empty));
+}
+window.addEventListener('resize', () => {
+  if (Math.abs(window.innerWidth - _lastW) < 40) return;   // 忽略微幅抖動
+  _lastW = window.innerWidth;
+  clearTimeout(_rt);
+  _rt = setTimeout(redrawBubbles, 200);
+});
+// 換主題時 SVG 裡寫死的顏色不會更新（它們是建立當下讀 CSS 變數寫進去的）
+window.addEventListener('tq:theme', redrawBubbles);
+
+load();
+</script>
+</body></html>

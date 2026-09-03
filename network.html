@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>關聯網路 — 台股量化系統</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<style>
+/* ── 分段控制（iOS 風）──────────────────────────────────
+   用一顆滑動的藥丸取代三顆按鈕。三種模式是互斥的「同一件事的
+   不同看法」，分段控制正是為互斥選項設計的；三顆獨立按鈕會讓人
+   以為可以複選。 */
+.ctl{display:flex;align-items:center;gap:var(--gap-md);flex-wrap:wrap;
+  margin-bottom:var(--gap-md)}
+.seg{display:inline-flex;background:var(--raised);border-radius:var(--r-md);
+  padding:3px;gap:2px;position:relative}
+.seg button{border:none;background:transparent;color:var(--sub);
+  font-family:inherit;font-size:var(--fs-sm);padding:7px 15px;
+  border-radius:calc(var(--r-md) - 3px);cursor:pointer;white-space:nowrap;
+  transition:background .18s ease,color .18s ease}
+.seg button:hover{color:var(--text)}
+.seg button.on{background:var(--border);color:var(--text)}
+.seg.mini button{font-size:var(--fs-tiny);padding:5px 11px}
+/* `hidden` 屬性靠的是瀏覽器預設的 [hidden]{display:none}，
+   但那是 UA 樣式表——.seg 的 display:inline-flex 是作者樣式，
+   優先度較高，會直接蓋掉它。不補這條，隱藏就是不會生效。 */
+.seg[hidden]{display:none}
+.ctl .grow{flex:1}
+/* 產業鏈下拉：47 條鏈用分段控制放不下，只有這裡用 select。
+   自己畫樣式是因為原生 select 在深色主題下會是白底黑字。 */
+#chainSel{background:var(--raised);color:var(--text);border:none;
+  font-family:inherit;font-size:var(--fs-sm);padding:7px 12px;
+  border-radius:var(--r-md);cursor:pointer;max-width:260px}
+#chainSel[hidden]{display:none}
+#sidInput{background:var(--raised);color:var(--text);border:none;
+  font-family:inherit;font-size:var(--fs-sm);padding:7px 12px;
+  border-radius:var(--r-md);width:110px}
+#sidInput[hidden]{display:none}
+.hint{font-size:var(--fs-micro);color:var(--faint)}
+
+/* ── 指標列 ── */
+#stats{display:flex;gap:var(--gap-lg);flex-wrap:wrap;
+  margin-bottom:var(--gap-md)}
+.st{background:var(--card);border-radius:var(--r-flat);padding:10px 16px;
+  min-width:96px}
+.st .k{font-size:var(--fs-micro);color:var(--muted);letter-spacing:.04em}
+.st .v{font-size:var(--fs-xl);font-weight:600;letter-spacing:-.02em;
+  margin-top:1px}
+
+/* ── 版面：圖 + 側欄 ── */
+.wrap{display:grid;grid-template-columns:minmax(0,1fr) 320px;
+  gap:var(--gap-md);align-items:start}
+@media (max-width:900px){.wrap{grid-template-columns:minmax(0,1fr)}}
+
+/* 高度直接吃視窗，寬度吃容器——**不要用 aspect-ratio**。
+
+   上一版用 `aspect-ratio:1640/1060` + `max-height:min(74vh,880px)`：
+   在寬而矮的視窗（例如 2000×700）上，高度先被 74vh=518px 卡住，
+   長寬比再把寬度反推成 801px —— 右邊空了一大片，使用者回報
+   「網路圖版面太小」。
+
+   改成高度自己決定、寬度吃滿，然後由 JS 把畫布座標設成容器的
+   **實際像素**（見 canvasSize），縮放倍率固定 1、不會留白。 */
+#net{height:clamp(420px, 76vh, 1000px);background:var(--card);
+  border-radius:var(--r-lg);overflow:hidden;position:relative}
+@media (max-width:900px){
+  /* 手機是直的，給它更多高度——畫布會跟著變直式 */
+  #net{height:clamp(460px, 68vh, 720px)}
+}
+#net svg.tqg{width:100%;height:100%;display:block;cursor:grab;
+  touch-action:none}
+#net svg.tqg:active{cursor:grabbing}
+#netMsg{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;color:var(--muted);font-size:var(--fs-sm)}
+
+/* 標籤字級跟著畫布的視覺倍率 --s（由 draw() 設在 #net 上）走。
+   畫布會依容器放大，字沒跟著放大的話大螢幕上會小得看不清。 */
+#net .tqg-lbl{font-size:calc(12px * var(--s,1))}
+/* 分段欄名：畫在畫布頂端的留白裡（viewBox 上緣是 -20） */
+#net .tqg-band-lbl{font-size:calc(12px * var(--s,1));font-weight:600;
+  fill:var(--muted);letter-spacing:.04em}
+/* 樞紐節點（ETF／產業）的標籤要比個股醒目——它們是骨架 */
+.tqg-node.hub .tqg-lbl{font-size:calc(14px * var(--s,1));
+  font-weight:600;fill:var(--text)}
+
+#netLegend{display:flex;flex-wrap:wrap;gap:var(--gap-sm);
+  margin-top:var(--gap-sm)}
+.lg{font-size:var(--fs-micro);color:var(--sub);background:var(--raised);
+  padding:4px 10px;border-radius:99px}
+.lg i{display:inline-block;width:8px;height:8px;border-radius:50%;
+  margin-right:5px;vertical-align:middle}
+.lg i.line{width:14px;height:2px;border-radius:1px}
+
+/* ── 側欄：點節點後的明細 ── */
+#side{background:var(--card);border-radius:var(--r-lg);padding:16px;
+  position:sticky;top:var(--gap-md)}
+#side .ph{color:var(--muted);font-size:var(--fs-sm);line-height:1.7}
+.sd-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.sd-h .n{font-size:var(--fs-xl);font-weight:600;letter-spacing:-.01em}
+.sd-h .c{font-size:var(--fs-sm);color:var(--muted);
+  font-variant-numeric:tabular-nums}
+.sd-meta{font-size:var(--fs-micro);color:var(--muted);margin-top:4px;
+  line-height:1.6}
+.sd-tags{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.tag{font-size:var(--fs-micro);padding:3px 9px;border-radius:99px;
+  background:var(--raised);color:var(--sub)}
+.sd-sec{font-size:var(--fs-micro);color:var(--muted);letter-spacing:.05em;
+  margin:14px 0 6px}
+.nb{display:flex;align-items:center;gap:8px;padding:5px 0;
+  border-bottom:1px solid var(--hairline);font-size:var(--fs-xs)}
+.nb:last-child{border-bottom:none}
+.nb .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;cursor:pointer}
+.nb .nm:hover{color:var(--purple)}
+.nb .w{font-variant-numeric:tabular-nums;color:var(--muted);
+  font-size:var(--fs-micro)}
+.sd-go{display:inline-block;margin-top:14px;font-size:var(--fs-sm);
+  color:var(--purple);text-decoration:none}
+.sd-go:hover{text-decoration:underline}
+
+/* ── 可靠度說明 ── */
+/* 說明在圖的上方，所以是 margin-**bottom** */
+#cov{background:var(--card);border-radius:var(--r-lg);padding:14px 16px;
+  margin-bottom:var(--gap-md);font-size:var(--fs-xs);color:var(--sub);
+  line-height:1.75;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--gap-md)}
+#cov .lab{font-size:var(--fs-micro);color:var(--muted);letter-spacing:.05em;
+  display:block;margin-bottom:3px}
+#cov .warn{color:var(--yellow)}
+#cov p{margin-bottom:8px}
+#cov p:last-child{margin-bottom:0}
+</style>
+<script src="./assets/tq.js?v=2026090106"></script>
+<script src="./assets/graph.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+
+<div class="topbar">
+  <span class="brand">台股量化</span>
+  <div class="nav">
+    <a href="./index.html">總覽</a>
+    <a href="./market.html">市場結構</a>
+    <a href="./network.html" class="on">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330">個股深度</a>
+    <a href="./analytics.html">模型績效</a>
+    <a href="./learn.html">名詞解說</a>
+  </div>
+  <span class="theme-sw" id="themeSw"></span>
+</div>
+
+<h1>關聯網路</h1>
+<div class="sub">哪些股票是一夥的。<b>「關聯」沒有唯一定義</b>——三種切法量的是不同的東西，三張圖長得不一樣才是對的。點任一節點看它連到誰。</div>
+
+<div class="ctl">
+  <div class="seg" id="modeSeg">
+    <button data-m="all">全方位</button>
+    <button data-m="etf">ETF 資金族群</button>
+    <button data-m="relations">公司關係</button>
+    <button data-m="supply">官方產業鏈</button>
+    <button data-m="chain">產業別・分段</button>
+    <button data-m="corr">報酬連動</button>
+  </div>
+  <select id="chainSel" hidden title="選一條產業鏈"></select>
+  <input id="sidInput" hidden placeholder="股票代號" maxlength="6"
+         title="輸入代號後按 Enter">
+  <div class="seg mini" id="adjSeg" hidden>
+    <button data-a="excess">扣除大盤</button>
+    <button data-a="raw">原始報酬</button>
+  </div>
+  <div class="seg mini" id="layoutSeg" title="節點怎麼擺">
+    <button data-l="force">力導向</button>
+    <button data-l="group">分類扇形</button>
+    <button data-l="radial">樞紐放射</button>
+    <button data-l="stage">鏈上分段</button>
+  </div>
+  <span class="grow"></span>
+  <span class="hint" id="perf"></span>
+  <button class="btn" id="zoomOut" title="縮小">−</button>
+  <button class="btn" id="zoomIn" title="放大">＋</button>
+  <button class="btn" id="resetBtn">重設視角</button>
+</div>
+
+<div id="stats"></div>
+
+<!-- 說明放在圖的**上方**。原本在最下面，要捲過整張圖才看得到——
+     而「這條線代表什麼」正是看圖之前就該知道的事。 -->
+<div id="cov"></div>
+
+<div class="wrap">
+  <div>
+    <div id="net"><div id="netMsg">載入中…</div></div>
+    <div id="netLegend"></div>
+  </div>
+  <aside id="side">
+    <div class="ph">點圖上任一個節點，這裡會顯示它連到哪些標的。<br><br>
+      <b>按住 Ctrl（Mac ⌘）+ 滾輪</b>縮放，或用上面的 ＋／−；
+      拖曳空白處平移、拖曳節點可以把它拉開。<br>
+      沒按 Ctrl 時滾輪會捲頁面，不會動到圖。</div>
+  </aside>
+</div>
+
+<script>
+let G = null, DATA = null;
+let MODE = 'supply', ADJ = 'excess', LAYOUT = 'stage';
+let CHAIN = 'D000';   // 半導體：成員最多、上中下游最完整
+let SID = '2330';
+
+/* 把 token 色轉成半透明填色。
+   刻意在執行期讀 CSS 變數而不是寫死 rgba()——色票只能有一個來源
+   （tokens.css），寫死的話改主題時這頁會靜默地不跟著變。 */
+function tint(varName, alpha) {
+  const hex = TQ.cssVar(varName);
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return 'transparent';
+  const [r, g, b] = [1, 2, 3].map(i => parseInt(m[i], 16));
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/* 節點顏色 = 訊號。
+   為什麼不是產業別：實測「報酬連動」模式有 20 個產業，20 種顏色
+   沒有人分得出來，而且產業已經由**位置**表達了（同產業被樞紐拉在
+   一起）。同一個資訊不要用兩種通道講，剩下的通道拿來講別的。 */
+const SIG_COLOR = { BUY: '--green', SELL: '--red', HOLD: '--muted' };
+function sigVar(n) {
+  if (n.kind === 'hub') return '--purple';
+  return SIG_COLOR[n.signal] || '--faint';
+}
+
+function radiusOf(n, deg) {
+  // 樞紐用固定較大半徑：它的連線數（一檔 ETF 有 50 檔成分股）跟
+  // 個股的連線數（被 3 檔 ETF 持有）不在同一個量級，混在同一條
+  // 開根號曲線上，個股會小到看不見。
+  if (n.rel === 'self') return 20 * S;      // 關係圖的中心
+  const base = n.kind === 'hub'
+    ? 15 + Math.sqrt(deg) * 1.6
+    : 6 + Math.sqrt(deg) * 3.4;
+  return base * S;
+}
+
+function edgeAttr(w, kind) {
+  // 公司關係圖有兩種**性質不同**的線，粗細分不出來：
+  //   實線 = 同環節競爭（官方分類）
+  //   虛線 = 共用董監（官方申報），越粗共用越多人
+  if (kind === 'peer') {
+    return {width: 1.2, stroke: TQ.cssVar('--blue'), opacity: 0.5};
+  }
+  if (kind === 'group') {
+    return {width: (1 + Math.abs(w) * 2.4).toFixed(2),
+            stroke: TQ.cssVar('--orange'),
+            opacity: 0.85, dash: '5 4'};
+  }
+  const neg = w < 0;
+  const a = Math.abs(w);
+  return {
+    // 權重是 1（ETF／產業的「屬於」關係）時就用細線，
+    // 相關性模式才會因為 |r| 不同而有粗細變化
+    width: (0.7 + a * 2.2).toFixed(2),
+    stroke: neg ? TQ.cssVar('--red') : TQ.cssVar('--border-hi'),
+    opacity: neg ? 0.55 : (0.28 + a * 0.42).toFixed(2),
+  };
+}
+
+/* 畫布座標 = 容器的實際像素。
+
+   為什麼不寫死尺寸：viewBox 是 `-20 -20 W+40 H+60`，寫死之後
+   `preserveAspectRatio="meet"` 會把圖縮到容器的短邊，另一邊整片留白。
+   第一版寫死 1600×1000，在寬而矮的視窗上只用掉一半寬度——
+   那就是「網路圖版面太小」的成因。跟著容器走，倍率永遠是 1。
+
+   S 是視覺倍率：畫布變大時節點與字要跟著長，否則 3000px 寬的畫布上
+   一顆 r=10 的點小得像灰塵。上限 1.5，避免大螢幕上變成巨無霸。 */
+function canvasSize() {
+  const box = TQ.el('net').getBoundingClientRect();
+  // 下限只是防退化（容器還沒有版面時 width 會是 0），必須低到真機
+  // 不會踩到：最窄的手機 320px 視窗算出來是 248，下限若設 320 就會
+  // 把畫布撐得比容器寬，meet 再縮回去 —— 實測倍率變成 0.83，
+  // 又出現留白，等於把剛修好的問題換個地方犯一次。
+  const w = Math.max(200, Math.round(box.width) - 40);   // 扣 viewBox 的留白
+  const h = Math.max(200, Math.round(box.height) - 60);
+  // 下限 0.8 而不是 1：手機上 67 個節點擠在 298×400 的畫布裡，
+  // 節點維持原尺寸就排不開（實測仍有 1 對重疊，而重疊的節點等於
+  // 看不見）。讓它們跟著縮小，寧可小一點也不要藏起來——
+  // 反正圖可以捏放大。
+  return { w, h, s: Math.min(1.5, Math.max(0.8, Math.min(w, h * 1.6) / 1100)) };
+}
+let S = 1;              // 由 load() 更新，radiusOf 會用到
+
+function statCard(k, v) {
+  return `<div class="st"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+}
+
+function renderStats(d) {
+  // ⚠ 一律數**手上這份**的節點與邊，不要讀 coverage 裡的統計。
+  //   coverage 是後端在裁切之前寫的；手機上前端又裁了一次，
+  //   讀 coverage 會顯示「連線 246」而畫面上只有 47 條——
+  //   數字跟畫面不符是這頁最不能犯的錯。
+  const stocks = d.nodes.filter(n => n.kind === 'stock').length;
+  const hubs = d.nodes.length - stocks;
+  const edges = d.edges.length;
+  const cards = [
+    statCard('個股', stocks),
+    statCard(MODE === 'corr' ? '關聯' : (MODE === 'supply' ? '環節' : '族群'),
+             MODE === 'corr' ? edges : hubs),
+    statCard('連線', edges),
+    statCard('資料日期', d.date || '—'),
+  ];
+  TQ.html('stats', cards.join(''));
+}
+
+function renderLegend() {
+  const items = [
+    ['--green', '買進訊號'], ['--red', '賣出訊號'],
+    ['--muted', '觀望'], ['--faint', '無訊號'],
+  ];
+  const hubName = {etf: 'ETF（樞紐）', all: '樞紐（ETF／產業）',
+                   supply: '環節（樞紐）'}[MODE] || '產業（樞紐）';
+  if (MODE !== 'corr' && MODE !== 'relations') items.unshift(['--purple', hubName]);
+  let h = items.map(([v, t]) =>
+    `<span class="lg"><i style="background:${TQ.cssVar(v)}"></i>${t}</span>`).join('');
+  if (MODE === 'all') {
+    h = `<span class="lg"><i style="border-radius:2px;background:${TQ.cssVar('--purple')}"></i>方形＝ETF</span>`
+      + `<span class="lg"><i style="background:${TQ.cssVar('--purple')}"></i>圓形＝產業</span>` + h;
+  }
+  if (LAYOUT === 'stage' && MODE !== 'corr') {
+    h += `<span class="lg">${MODE === 'supply'
+      ? '由左至右＝官方產業鏈的上游→中游→下游'
+      : '由左至右＝上游→中游→下游→末端'}</span>`;
+  }
+  if (MODE === 'relations') {
+    h = `<span class="lg"><i class="line" style="background:${TQ.cssVar('--blue')}"></i>同環節競爭者</span>`
+      + `<span class="lg"><i class="line" style="background:${TQ.cssVar('--orange')}"></i>共用董監（同集團）</span>`
+      + `<span class="lg">沒有「誰賣給誰」的線——那份資料不存在</span>` + h;
+  }
+  if (MODE === 'corr') {
+    h += `<span class="lg"><i class="line" style="background:${TQ.cssVar('--border-hi')}"></i>正相關（越粗越強）</span>`;
+    h += `<span class="lg"><i class="line" style="background:${TQ.cssVar('--red')}"></i>負相關（一漲一跌）</span>`;
+  }
+  TQ.html('netLegend', h);
+}
+
+/* 產業鏈選單只填一次。選項來自後端（47 條鏈與各自的成員數），
+   前端不自己列一份——列兩份就一定會有一天不一樣。 */
+function fillChains(list) {
+  const sel = TQ.el('chainSel');
+  if (!list || sel.dataset.filled) return;
+  sel.innerHTML = list.map(c =>
+    `<option value="${TQ.esc(c.code)}">${TQ.esc(c.name)}（${c.stocks} 家）</option>`
+  ).join('');
+  sel.value = CHAIN;
+  sel.dataset.filled = '1';
+  sel.addEventListener('change', () => { CHAIN = sel.value; load(); });
+}
+
+function renderCov(c) {
+  fillChains(c.chains);
+  TQ.html('cov',
+    `<p><span class="lab">資料來源</span>${TQ.esc(c.source || '—')}</p>` +
+    `<p><span class="lab">這條線代表什麼</span>${md(c.note || '')}</p>` +
+    `<p class="warn"><span class="lab">請注意</span>${md(c.caveat || '')}</p>`);
+}
+
+/* 只支援 **粗體**，因為說明文字裡只用得到這一種強調。
+   先 escape 再轉，順序反了會讓資料內容有機會注入標籤。 */
+function md(s) {
+  return TQ.esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+}
+
+function showNode(id) {
+  const n = G && G.nodeOf(id);
+  if (!n) return;
+  const nb = G.neighbors(id);
+  const isHub = n.kind === 'hub';
+
+  let tags = '';
+  if (!isHub) {
+    if (n.signal) tags += `<span class="tag" style="color:${TQ.cssVar(sigVar(n))}">${n.signal}</span>`;
+    if (n.rank) tags += `<span class="tag">排名 #${n.rank}</span>`;
+    if (n.chg_pct !== undefined && n.chg_pct !== null)
+      tags += `<span class="tag" style="color:${TQ.signColor(n.chg_pct)}">${TQ.pctRaw(n.chg_pct)}</span>`;
+    if (n.group) tags += `<span class="tag">${TQ.esc(n.group)}</span>`;
+  }
+
+  const label = MODE === 'corr' ? '連動最強的'
+    : MODE === 'relations' ? '同環節競爭者／共用董監'
+    : MODE === 'supply' ? (isHub ? '這個環節的廠商' : '所屬環節')
+    : (isHub ? '成分股' : '被這些持有');
+  const rows = nb.slice(0, 40).map(x => {
+    const w = MODE === 'corr' ? `r ${TQ.num(x.w, 2)}` : '';
+    return `<div class="nb">` +
+      `<span class="nm" data-id="${TQ.esc(x.node.id)}">${TQ.esc(x.node.label)}</span>` +
+      `<span class="w">${w}</span></div>`;
+  }).join('') || '<div class="ph">沒有連線。</div>';
+
+  const more = nb.length > 40 ? `<div class="sd-meta">另有 ${nb.length - 40} 個未列出</div>` : '';
+  const go = (!isHub && n.code)
+    ? `<a class="sd-go" href="/stock/${TQ.esc(n.code)}">看 ${TQ.esc(n.label)} 的深度分析 →</a>` : '';
+
+  TQ.html('side',
+    `<div class="sd-h"><span class="n">${TQ.esc(n.label)}</span>` +
+    `<span class="c">${TQ.esc(n.code || '')}</span></div>` +
+    (n.detail ? `<div class="sd-meta">${TQ.esc(n.detail)}</div>` : '') +
+    (n.extra ? `<div class="sd-meta">${TQ.esc(n.extra)}</div>` : '') +
+    `<div class="sd-tags">${tags}</div>` +
+    `<div class="sd-sec">${label}（${nb.length}）</div>${rows}${more}${go}`);
+
+  // 側欄裡點名字 → 跳到圖上那個節點，不用自己在一團線裡找
+  document.querySelectorAll('#side .nm').forEach(e => {
+    e.addEventListener('click', () => { G.focus(e.dataset.id); showNode(e.dataset.id); });
+  });
+  G.focus(id);
+}
+
+async function load() {
+  TQ.html('net', '<div id="netMsg">計算中…</div>');
+  TQ.html('side', '<div class="ph">載入中…</div>');
+  // adj 只在相關性模式下有意義。不帶多餘的參數，靜態快照的檔名
+  // 才不會多出 etf/industry 各兩份一模一樣的 JSON。
+  // 節點上限跟著畫布面積走：手機（335×700）約 90 個，桌機吃滿 250。
+  // 不設限的話手機上 275 個節點會被碰撞分離推得跨過分段邊界，
+  // 欄位結構整個失效——實測水泥工業（上游）跑到中游那一帶。
+  //
+  // 上限同時**送給 API**（線上版少算一點）**也在前端再裁一次**。
+  // 兩邊都做是因為靜態快照只有固定幾個檔名，shim 不看 `max`，
+  // 手機開快照時拿回來的一定是完整那份——只靠 API 參數等於沒做。
+  const q = MODE === 'corr' ? `?by=corr&adj=${ADJ}`
+          : MODE === 'relations' ? `?by=relations&sid=${encodeURIComponent(SID)}`
+          : MODE === 'supply' ? `?by=supply&chain=${encodeURIComponent(CHAIN)}`
+          : `?by=${MODE}${MODE === 'etf' ? '' : `&max=${capNow()}`}`;
+  const d = await TQ.api('/api/network' + q);
+  if (d._error || !d.nodes) {
+    TQ.html('net', `<div id="netMsg">載入失敗：${TQ.esc(d._error || '無資料')}</div>`);
+    return;
+  }
+  DATA = d;
+  draw(d);
+}
+
+function capNow() {
+  const c = canvasSize();
+  return Math.round(Math.min(250, Math.max(50, c.w * c.h / 2600)));
+}
+
+/* 依排名裁到 cap 檔，順便把因此變成孤點的樞紐一起拿掉。
+
+   ⚠ 裁掉之後 coverage 的文案就跟畫面對不上了（它說「246 檔進入圖中」，
+     手機上其實只有 90），所以下面會把實際張數補寫進去。
+     說明與畫面不符是這頁最不能犯的錯——整頁的價值就在那段說明。 */
+function trimToCap(d, cap, keepAllHubs) {
+  const stocks = d.nodes.filter(n => n.kind === 'stock');
+  if (stocks.length <= cap) return d;
+  const keep = new Set(stocks.slice()
+    .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9))
+    .slice(0, cap).map(n => n.id));
+  /* ⚠ 樞紐要用 **kind** 判斷，不要用 id 前綴白名單。
+     原本寫死 `etf:` 與 `ind:`，新增 `seg:`（官方產業鏈）之後
+     它的邊兩端都不在白名單裡 → 378 條邊全部被丟掉，
+     圖上剩一堆浮空的點，而且「連線 0」看起來像資料本來就沒有。
+     節點自己就帶著 kind，沒有理由再維護一份前綴清單。 */
+  const hubIds = new Set(d.nodes.filter(n => n.kind === 'hub').map(n => n.id));
+  const ok = id => keep.has(id) || hubIds.has(id);
+  const edges = d.edges.filter(([a, b]) =>
+    ok(a) && ok(b) && (keep.has(a) || keep.has(b)));
+  const deg = {};
+  edges.forEach(([a, b]) => { deg[a] = (deg[a] || 0) + 1; deg[b] = (deg[b] || 0) + 1; });
+  // 只剩 1 檔成分股的樞紐畫出來是一根孤立的棒子，跟後端的規則一致
+  // 官方產業鏈模式：**每個環節都要留著**，那是鏈的骨架。
+  // 一般模式才丟掉只剩 1 檔的樞紐（單點連不成網路）。
+  const nodes = d.nodes.filter(n => n.kind === 'stock'
+    ? keep.has(n.id)
+    : (keepAllHubs || (deg[n.id] || 0) >= 2));
+  const ids = new Set(nodes.map(n => n.id));
+  const cov = Object.assign({}, d.coverage, {
+    note: (d.coverage.note || '') +
+      `｜此裝置的畫布較小，圖上再裁到**排名前 ${cap} 檔**`
+      + `（實際畫出 ${nodes.filter(n => n.kind === 'stock').length} 檔、`
+      + `${nodes.length - nodes.filter(n => n.kind === 'stock').length} 個樞紐）。`
+      + `樞紐上的家數仍是**完整的**，不是畫出來的那幾檔。`,
+  });
+  return Object.assign({}, d, {
+    nodes,
+    edges: edges.filter(([a, b]) => ids.has(a) && ids.has(b)),
+    coverage: cov,
+  });
+}
+
+/* 分段欄位由後端給（value_chain.STAGES），前端不自己定義順序——
+   定義兩次就一定會有一天不一樣。只保留**圖上真的有節點**的欄，
+   否則空欄會佔掉三分之一的寬度。 */
+function STAGE_COLS(d) {
+  const st = (d.coverage || {}).stages;
+  if (!st || !st.length) return null;
+  const used = new Set(d.nodes.map(n => n.stage_order == null ? 4 : n.stage_order));
+  return st.slice().sort((a, b) => a.order - b.order)
+           .filter(s => used.has(s.order))
+           .map(s => ({ label: s.label, order: s.order }));
+}
+
+/* 畫圖與取資料分開：換擺法、改視窗大小、切主題都只是重畫，
+   資料沒變就不該再打一次 API（也不該讓使用者再等一次網路）。 */
+function draw(raw) {
+  /* 手機上 316 個節點擠在三條帶裡完全讀不了（環節標籤整片疊住），
+     所以一樣要裁。
+
+     先前不裁的理由是「裁掉成員會讓『這個環節有幾家』變成假的」——
+     那個顧慮是錯的：家數來自 API 的完整名單，不是數畫出來的點。
+     真正要保住的是**每個環節都得在**，那才是鏈的骨架，
+     所以 supply 模式傳 keepAllHubs。 */
+  // 公司關係本來就只有一檔的鄰居（約 25~30 個節點），不必再裁
+  const d = (MODE === 'corr' || MODE === 'relations') ? raw
+    : trimToCap(raw, capNow(), MODE === 'supply');
+  renderStats(d);
+  renderLegend();
+  renderCov(d.coverage || {});
+
+  if (!d.nodes.length) {
+    TQ.html('net', '<div id="netMsg">這個模式目前沒有足夠資料可畫。</div>');
+    return;
+  }
+
+  const box = TQ.el('net');
+  const LAYOUT_NAME = {force:'力導向', group:'分類扇形', radial:'樞紐放射', stage:'鏈上分段'};
+  box.addEventListener('tqg:settled', ev => {
+    TQ.html('perf', `${d.nodes.length} 節點・${d.edges.length} 連線・`
+      + `${LAYOUT_NAME[ev.detail.layout] || ev.detail.layout} ${ev.detail.ms}ms`);
+  }, { once: true });
+
+  if (G) G.destroy();
+  const c = canvasSize();
+  S = c.s;
+  box.style.setProperty('--s', S);       // 給標籤字級用
+  G = TQGraph.create({
+    container: box,
+    width: c.w, height: c.h,
+    layout: LAYOUT,
+    nodes: d.nodes,
+    edges: d.edges,
+    colorOf: g => TQ.cssVar('--border-hi'),
+    strokeOf: n => n.rel === 'self' ? TQ.cssVar('--purple') : TQ.cssVar(sigVar(n)),
+    fillOf: n => n.kind === 'hub'
+      ? tint('--purple', 0.14)
+      : (n.signal ? tint(sigVar(n), 0.10) : TQ.cssVar('--card')),
+    radiusOf,
+    edgeAttr,
+    // 全方位模式裡兩種樞紐同時出現，顏色已經拿去講訊號了，
+    // 只剩形狀這個通道可以分辨它們
+    shapeOf: n => (n.kind === 'hub' && n.id.startsWith('etf:')) ? 'square' : 'circle',
+    // 公司關係圖的軸心是那檔被選中的股票，不是樞紐節點
+    pivotOf: n => n.kind === 'hub' || n.rel === 'self',
+    colOf: n => (n.stage_order == null ? 4 : n.stage_order),
+    columns: STAGE_COLS(d),
+    alwaysLabel: (n, deg) => n.kind === 'hub' || deg >= 5
+      || MODE === 'relations',
+    titleOf: (n, deg) => n.kind === 'hub'
+      ? `${n.label}・${deg} 檔成分股`
+      : `${n.label} ${n.code}・${deg} 個關聯${n.signal ? '・' + n.signal : ''}`,
+    onSelect: showNode,
+  });
+  // 樞紐節點加上 class，讓 CSS 把它的標籤放大（graph.js 不管樣式）
+  d.nodes.forEach((n, i) => {
+    if (n.kind === 'hub') box.querySelector(`.tqg-node[data-i="${i}"]`)?.classList.add('hub');
+  });
+  TQ.html('side', '<div class="ph">點圖上任一個節點，這裡會顯示它連到哪些標的。</div>');
+}
+
+function syncSeg() {
+  // ⚠ 先調整狀態，最後才畫按鈕。反過來的話：從「樞紐放射」切到
+  // 報酬連動時，按鈕會停在 radial 高亮，但實際跑的是力導向
+  // （那個模式沒有樞紐，graph.js 會自己退回去）——顯示跟事實不符。
+  const noHub = (MODE === 'corr');
+  if (noHub && (LAYOUT === 'radial' || LAYOUT === 'stage')) LAYOUT = 'force';
+  ['radial', 'stage'].forEach(k => {
+    const b = document.querySelector(`#layoutSeg button[data-l="${k}"]`);
+    b.disabled = noHub;
+    b.style.opacity = noHub ? .35 : '';
+    b.title = noHub ? '報酬連動模式沒有樞紐節點，這個擺法用不上' : '';
+  });
+  TQ.el('adjSeg').hidden = (MODE !== 'corr');
+  TQ.el('chainSel').hidden = (MODE !== 'supply');
+  TQ.el('sidInput').hidden = (MODE !== 'relations');
+  // 這個模式是「以一檔為中心的鄰居圖」，樞紐放射才擺得對；
+  // 鏈上分段沒有段可分，分類扇形會把中心那顆推到邊上。
+  if (MODE === 'relations' && LAYOUT !== 'force') LAYOUT = 'radial';
+
+  document.querySelectorAll('#modeSeg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.m === MODE));
+  document.querySelectorAll('#adjSeg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.a === ADJ));
+  document.querySelectorAll('#layoutSeg button').forEach(b =>
+    b.classList.toggle('on', b.dataset.l === LAYOUT));
+}
+
+document.querySelectorAll('#modeSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    if (MODE === b.dataset.m) return;
+    MODE = b.dataset.m; syncSeg(); load();
+  });
+});
+document.querySelectorAll('#adjSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    if (ADJ === b.dataset.a) return;
+    ADJ = b.dataset.a; syncSeg(); load();
+  });
+});
+document.querySelectorAll('#layoutSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    if (b.disabled || LAYOUT === b.dataset.l) return;
+    LAYOUT = b.dataset.l;
+    syncSeg();
+    // 換擺法不必重新打 API，資料沒變——直接用手上的重畫
+    if (DATA) draw(DATA); else load();
+  });
+});
+const sidIn = TQ.el('sidInput');
+sidIn.value = SID;
+sidIn.addEventListener('keydown', ev => {
+  if (ev.key !== 'Enter') return;
+  const v = sidIn.value.trim();
+  if (v && v !== SID) { SID = v; load(); }
+});
+TQ.el('resetBtn').addEventListener('click', () => G && G.reset());
+TQ.el('zoomIn').addEventListener('click', () => G && G.zoomBy(1.25));
+TQ.el('zoomOut').addEventListener('click', () => G && G.zoomBy(0.8));
+
+/* 畫布尺寸跟著容器走，所以視窗一變就要重畫。
+   debounce 是必要的：佈局要跑 420 回合，拖視窗邊緣時每一格都重算
+   會整個卡住。門檻 60px 則是為了忽略捲軸出現／網址列收合這類抖動。 */
+let _rt = null, _lastW = window.innerWidth;
+window.addEventListener('resize', () => {
+  if (Math.abs(window.innerWidth - _lastW) < 60) return;
+  _lastW = window.innerWidth;
+  clearTimeout(_rt);
+  _rt = setTimeout(() => { if (DATA) draw(DATA); }, 220);
+});
+
+/* 換主題要重畫：節點的描邊與填色是在建立當下讀 CSS 變數、
+   寫進 SVG 屬性的，屬性不會跟著 CSS 變數更新。 */
+window.addEventListener('tq:theme', () => { if (DATA) draw(DATA); });
+
+syncSeg();
+load();
+</script>
+</body></html>

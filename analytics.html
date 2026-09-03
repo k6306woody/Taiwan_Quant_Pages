@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>模型績效 — 台股量化系統</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<style>
+/* 本頁專屬（共用元件已在 base.css） */
+/* 寬螢幕解除 960px 上限（3440 寬時原本只用 28%）。
+   圖表在寬螢幕改雙欄並排，避免單張圖被拉到 3000px 寬反而看不出轉折。 */
+#charts{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--gap-md)}
+@media (min-width:1500px){ #charts{grid-template-columns:repeat(2,minmax(0,1fr))} }
+#charts > section{min-width:0}
+#charts > section > .sec-h{margin-top:0}
+.sec-h{font-size:var(--fs-sm);color:var(--purple);font-weight:600;
+  letter-spacing:1px;margin:18px 4px 8px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.tile{background:var(--card);border-radius:var(--r-lg);padding:12px 14px}
+.tile .k{font-size:var(--fs-xs);color:var(--muted);margin-bottom:4px}
+.tile .v{font-size:var(--fs-2xl);font-weight:700}
+.tile .s{font-size:var(--fs-xs);color:var(--muted);margin-top:3px}
+.card{padding:var(--gap-lg)}
+.note{font-size:var(--fs-xs);color:var(--muted);margin-top:8px;line-height:1.5}
+.verdict{font-size:var(--fs-lg);font-weight:700;padding:8px 14px;
+  border-radius:var(--r-md);display:inline-block;margin-top:4px}
+.loading{padding:40px}
+
+/* ── 四因子熱力圖（C7）────────────────────────────────
+   顏色畫的是**當日橫斷面百分位**，不是原始分數。
+   原因：實測基本面只有 4 個相異值、情緒從不為負，
+   直接把原始分數對應到顏色會變成四條色帶＋單邊色階，看起來像壞掉。 */
+#heat{overflow-x:auto}
+#heat table{width:100%;border-collapse:collapse;font-size:var(--fs-xs)}
+#heat th{background:var(--raised);color:var(--purple);padding:7px 8px;
+  font-weight:600;font-size:var(--fs-tiny);position:sticky;top:0}
+#heat td{padding:0;border-top:1px solid var(--border)}
+#heat td.lbl{padding:5px 8px;white-space:nowrap}
+#heat .cellv{display:block;padding:6px 4px;text-align:center;
+  font-variant-numeric:tabular-nums;border-radius:2px}
+#heat .code{color:var(--blue);cursor:pointer}
+#heat .code:hover{color:var(--purple);text-decoration:underline}
+#heat tbody tr:hover td{outline:1px solid var(--border-hi)}
+.heat-legend{display:flex;align-items:center;gap:6px;
+  font-size:var(--fs-tiny);color:var(--muted);margin-top:8px;flex-wrap:wrap}
+.heat-legend i{display:inline-block;width:26px;height:11px;border-radius:2px}
+/* 術語連到白話解說：這頁滿是 Rank IC / t 值 / 有效樣本，
+   對寫程式的人方便，對看盤的人不一定。點一下就能看白話版。 */
+.tt{color:var(--blue);border-bottom:1px dashed var(--blue);cursor:help;
+  text-decoration:none}
+.tt:hover{color:var(--purple);border-bottom-color:var(--purple)}
+</style>
+<script src="./assets/tq.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+<div class="topbar nav-only">
+  <span class="brand">台股量化</span>
+  <div class="nav">
+    <a href="./index.html">總覽</a>
+    <a href="./market.html">市場結構</a>
+    <a href="./network.html">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330">個股深度</a>
+    <a href="./analytics.html" class="on">模型績效</a>
+    <a href="./learn.html">名詞解說</a>
+  </div>
+  <span class="theme-sw" id="themeSw"></span>
+</div>
+<h1>模型績效追蹤</h1>
+<div class="sub">每天的強多/強空排行 vs 之後真實走勢。<b>所有數字皆為超額報酬（已扣除 0050）</b>，並附樣本數與 t 值 — 沒有可靠度的數字不算數。<br>看不懂的詞可以點<a class="tt" href="./learn.html">名詞解說</a>，每條都有白話版。</div>
+<div id="content"><div class="loading">載入中...</div></div>
+
+<script>
+const fmtPct=(v,d)=>TQ.pct(v,d==null?2:d);
+// 把術語包成連到 /learn 的連結
+const T=(term,label)=>`<a class="tt" href="/learn?t=${encodeURIComponent(term)}"
+  title="點開白話解說">${label||term}</a>`;
+// 顏色一律讀 CSS 變數（改 tokens.css 全站同步）
+const CLR={};
+function initColors(){
+  Object.assign(CLR,{
+    top:TQ.cssVar('--green'), uni:TQ.cssVar('--yellow'), btm:TQ.cssVar('--red'),
+    ic:TQ.cssVar('--blue'), roll:TQ.cssVar('--purple'),
+    grid:TQ.cssVar('--border'), text:TQ.cssVar('--sub'),
+  });
+}
+
+async function load(){
+  initColors();
+  await TQ.loadScript(TQ.CDN.chartjs);   // 條件載入：需要時才拉圖表庫
+  const d=await TQ.api('/api/analytics');
+  if(d._error){
+    TQ.html('content','<div class="loading">載入失敗：'+TQ.esc(d._error)+'</div>');
+    return;
+  }
+  render(d);
+}
+
+// 百分位 → 顏色。低=紅、中=灰、高=綠，中間帶刻意接近背景色，
+// 這樣一眼看到的就是「特別強」與「特別弱」的格子。
+function heatColor(p){
+  const g=[166,227,161], r=[243,139,168], n=[49,50,68];
+  const t=Math.max(0,Math.min(1,p));
+  const mix=(a,b,k)=>a.map((v,i)=>Math.round(v+(b[i]-v)*k));
+  const c = t>=0.5 ? mix(n,g,(t-0.5)*2) : mix(n,r,(0.5-t)*2);
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+async function loadHeatmap(){
+  const d=await TQ.api('/api/heatmap');
+  const box=document.getElementById('heat');
+  if(!box) return;
+  if(d._error||!d.rows||!d.rows.length){
+    box.innerHTML='<div class="loading">尚無資料</div>'; return;
+  }
+  const head=`<tr><th style="text-align:left">代號</th><th style="text-align:left">名稱</th>
+    <th>綜合</th>${d.factors.map(f=>`<th>${f}</th>`).join('')}</tr>`;
+  const body=d.rows.map(r=>`<tr>
+    <td class="lbl"><span class="code" onclick="location.href='/stock/${r.stock_id}'">${r.stock_id}</span></td>
+    <td class="lbl" style="color:var(--sub)">${TQ.esc(r.name)}</td>
+    <td class="lbl" style="text-align:right;color:${TQ.signColor(r.composite)}">${TQ.signed(r.composite,3)}</td>
+    ${r.cells.map(c=>`<td><span class="cellv"
+        style="background:${heatColor(c.pct)};color:${c.pct>0.72||c.pct<0.28?'var(--deep)':'var(--text)'}"
+        title="${c.factor} 原始分 ${TQ.signed(c.raw,3)}｜今日排名前 ${Math.round((1-c.pct)*100)}%"
+        >${Math.round(c.pct*100)}</span></td>`).join('')}
+  </tr>`).join('');
+  box.innerHTML=`<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function tile(k,v,s,cls){
+  return `<div class="tile"><div class="k">${k}</div><div class="v ${cls||''}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`;
+}
+
+// 判定一律由後端的 verdict 決定，前端不再自己比大小。
+// 原因：舊版寫 `mean_ic > 0.03 就算有效`，完全沒看樣本數與顯著性——
+// 那正是把雜訊當成能力的來源。
+const VERDICT={
+  positive:   {t:'✅ 顯著為正 — 排行有預測力', bg:'#1a3a1a', fg:'--green'},
+  negative:   {t:'❌ 顯著為負 — 勿照排行操作真錢', bg:'#3a1a1a', fg:'--red'},
+  noise:      {t:'⚠ 與 0 無異 — 目前沒有預測力', bg:'#3a3a1a', fg:'--yellow'},
+  insufficient:{t:'🔒 樣本不足 — 不下任何結論', bg:'#2a2a3a', fg:'--sub'},
+};
+
+function render(d){
+  // C3：一律以「超額報酬」（已扣 0050）為準。絕對報酬含大盤 beta，
+  // 大盤漲的時候看起來人人是股神。
+  const s5=d.summary.fwd5_exc||{}, s1=d.summary.fwd1_exc||{}, s20=d.summary.fwd20_exc||{};
+  const abs5=d.summary.fwd5_ret||{};
+  let h='';
+
+  // ── 總評 ──
+  const v=VERDICT[s5.verdict]||VERDICT.insufficient;
+  const beta=(s5.ready&&abs5.ready)
+    ?`　同期絕對報酬 IC ${TQ.signed(abs5.mean_ic,4)}（含大盤 beta，僅供對照）`:'';
+  h+=`<div class="card">
+      <div class="k" style="font-size:var(--fs-xs);color:var(--muted)">
+        綜合判定（5日<b style="color:var(--purple)">超額</b>報酬）</div>
+      <span class="verdict" style="background:${v.bg};color:${TQ.cssVar(v.fg)}">${v.t}</span>
+      <div class="note">
+      <b>樣本</b>：逐日觀測 ${s5.n_days||0} 天，<b>${T('有效樣本')} ${s5.n_eff??'—'}</b>
+        （5日視野每天取樣會重疊 4 天，須除以視野長度才是獨立觀測數）<br>
+      <b>統計</b>：平均 ${T('Rank IC','IC')} ${TQ.signed(s5.mean_ic,4)}　${T('t值','t 值')} ${TQ.signed(s5.ic_t,2)}
+        （|t|&gt;2 才算${T('統計顯著','顯著')}不等於 0）${beta}<br>
+      <b>為什麼看${T('超額報酬','超額')}</b>：實測平均絕對報酬 +1.05%／5日，但扣掉${T('基準','0050')}後是 −0.45%
+        —— 那 1% 是大盤給的，不是選股給的。<br>
+      ⚠ 2026/07/13 之前的樣本處於「籌碼凍結事故」期間，數字反映壞掉的系統。</div></div>`;
+
+  // ── 指標磚 ──
+  h+='<div class="sec-h">關鍵指標</div><div class="tiles">';
+  if(s5.ready){
+    // 顏色只在「顯著」時才給多空色，否則一律中性——避免不顯著的數字看起來像結論
+    const icCls=s5.verdict==='positive'?'up':s5.verdict==='negative'?'down':'flat';
+    h+=tile(T('Rank IC','Rank IC')+'（5日超額）',(s5.mean_ic>=0?'+':'')+s5.mean_ic.toFixed(3),
+            `t=${TQ.signed(s5.ic_t,2)}　有效樣本 ${s5.n_eff??'—'}`,icCls);
+    h+=tile('強多−強空 價差/5日',fmtPct(s5.avg_spread),`價差>0 天數 ${(s5.spread_hit*100).toFixed(0)}%`,s5.avg_spread>0?'up':'down');
+    h+=tile('強多組 vs 全體',fmtPct(s5.top_vs_univ),`贏過大盤 ${(s5.top_win_univ*100).toFixed(0)}% 的日子`,s5.top_vs_univ>0?'up':'down');
+  }
+  // 這兩塊同樣只在顯著時才上色。20日視野尤其危險：逐日取樣重疊 19 天，
+  // 未修正的 t 值會被灌水約 4.5 倍，很容易把雜訊看成「反向指標」。
+  const icTile=(lbl,s)=>tile(lbl,(s.mean_ic>=0?'+':'')+s.mean_ic.toFixed(3),
+      `t=${TQ.signed(s.ic_t,2)}　有效樣本 ${s.n_eff??'—'}`,
+      s.verdict==='positive'?'up':s.verdict==='negative'?'down':'flat');
+  if(s1.ready) h+=icTile(T('Rank IC')+'（1日超額）',s1);
+  h+=s20.ready?icTile(T('Rank IC')+'（20日超額）',s20)
+             :tile(T('Rank IC')+'（20日超額）','—','標籤累積中（需20交易日）');
+  h+='</div>';
+
+  // ── 圖表 ──
+  h+='<div id="charts">';
+  h+='<section><div class="sec-h">多空組累積報酬（照排行操作的模擬）</div><div class="card"><canvas id="curveChart" height="120"></canvas><div class="note">綠=每天買「強多Top5」、紅=每天買「強空Btm5」、黃=全體平均。綠在黃上、紅在黃下 = 排行有鑑別力。<b>已扣除 0050</b>。</div></div></section>';
+  h+='<section><div class="sec-h">每日 Rank IC（5日超額）</div><div class="card"><canvas id="icChart" height="110"></canvas><div class="note">每根柱=當天排名與5日後超額報酬的相關性；紫線=10日滾動平均。穩定在 0 軸上方才算有效。</div></div></section>';
+  if(d.factor_ic&&d.factor_ic.length){
+    h+='<section><div class="sec-h">四因子預測力（歷史 IC 檢驗）</div><div class="card"><canvas id="factorChart" height="80"></canvas><div class="note">各因子對未來20日報酬的平均預測力（factor_ic.py 檢驗結果）。</div></div></section>';
+  }
+  h+='</div>';
+
+  // ── 四因子熱力圖 ────────────────────────────────────
+  h+=`<div class="sec-h">今日四因子熱力圖（顏色＝當日橫斷面${T('鑑別度','百分位')}）</div>
+      <div class="card"><div id="heat"><div class="loading">載入中...</div></div>
+      <div class="heat-legend">
+        <span>弱</span><i style="background:${heatColor(0)}"></i>
+        <i style="background:${heatColor(.25)}"></i><i style="background:${heatColor(.5)}"></i>
+        <i style="background:${heatColor(.75)}"></i><i style="background:${heatColor(1)}"></i>
+        <span>強</span>
+        <span style="margin-left:10px">顏色是「今天這批股票裡排第幾」，不是絕對分數
+        —— 滑鼠移上去看真實分數。基本面只有 4 個相異值，同分的會同色，那是資料本身如此。</span>
+      </div></div>`;
+
+  document.getElementById('content').innerHTML=h;
+  loadHeatmap();
+
+  Chart.defaults.color=CLR.text;Chart.defaults.borderColor=CLR.grid;Chart.defaults.font.size=11;
+
+  if(d.curve&&d.curve.dates.length){
+    new Chart(document.getElementById('curveChart'),{type:'line',
+      data:{labels:d.curve.dates,datasets:[
+        {label:'強多 Top5',data:d.curve.top,borderColor:CLR.top,backgroundColor:CLR.top,tension:.2,pointRadius:0,borderWidth:2},
+        {label:'全體平均',data:d.curve.universe,borderColor:CLR.uni,backgroundColor:CLR.uni,tension:.2,pointRadius:0,borderWidth:1.5,borderDash:[5,4]},
+        {label:'強空 Btm5',data:d.curve.bottom,borderColor:CLR.btm,backgroundColor:CLR.btm,tension:.2,pointRadius:0,borderWidth:2}]},
+      options:{plugins:{legend:{labels:{boxWidth:12}}},scales:{y:{ticks:{callback:v=>v+'%'}}},interaction:{mode:'index',intersect:false}}});
+  }
+  if(d.ic_series&&d.ic_series.dates.length){
+    new Chart(document.getElementById('icChart'),{
+      data:{labels:d.ic_series.dates,datasets:[
+        {type:'bar',label:'每日IC',data:d.ic_series.ic,
+         backgroundColor:d.ic_series.ic.map(v=>(v>=0?CLR.top:CLR.btm)+'80')},
+        {type:'line',label:'10日滾動',data:d.ic_series.rolling,borderColor:CLR.roll,tension:.3,pointRadius:0,borderWidth:2}]},
+      options:{plugins:{legend:{labels:{boxWidth:12}}},scales:{y:{grid:{color:c=>c.tick.value===0?'#585b70':CLR.grid}}}}});
+  }
+  if(d.factor_ic&&d.factor_ic.length){
+    new Chart(document.getElementById('factorChart'),{type:'bar',
+      data:{labels:d.factor_ic.map(x=>x.factor),datasets:[{label:'平均IC（20日）',
+        data:d.factor_ic.map(x=>x.mean_ic),
+        backgroundColor:d.factor_ic.map(x=>x.mean_ic>=0?CLR.top:CLR.btm)}]},
+      options:{indexAxis:'y',plugins:{legend:{display:false}},
+        scales:{x:{grid:{color:c=>c.tick.value===0?'#585b70':CLR.grid}}}}});
+  }
+}
+load();
+</script></body></html>

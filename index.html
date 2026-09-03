@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>台股量化終端</title>
+<link rel="stylesheet" href="./assets/tokens.css?v=2026090106">
+<link rel="stylesheet" href="./assets/base.css?v=2026090106">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#1e1e2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon.svg">
+<style>
+html,body{height:100%;overflow:hidden}
+/* 全幅終端版面：外殼的內距改由 #app 負責（body 仍吃 base.css 的
+   max-width 與置中，左右緣才會跟其他三頁一致）*/
+body{padding:0}
+#app{display:flex;flex-direction:column;height:100vh;padding:var(--gap-lg);gap:var(--gap-sm)}
+
+/* ── 頂部狀態列 ── */
+#topbar{margin-bottom:0;flex-shrink:0}   /* 其餘樣式由 base.css 的 .topbar 提供，避免兩邊漂移 */
+.mkt{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
+.mkt b{color:var(--text);font-weight:600;margin-left:3px}
+
+/* ── 三欄主體 ── */
+/* 左右欄改用 clamp 隨視窗成長（B7）：
+   原本寫死 170/250，在 3440 寬的螢幕上多出來的 2000px 全灌進中間表格，
+   而右欄的 AI 分析與新聞永遠只有 250px 寬、字全部擠成兩三個字一行。
+   表格其實不需要那麼寬，側欄才需要。 */
+#main{display:grid;
+  grid-template-columns:clamp(170px,12vw,280px) minmax(0,1fr) clamp(250px,20vw,520px);
+  gap:var(--gap-sm);flex:1;min-height:0}
+#colL,#colC,#colR{display:flex;flex-direction:column;gap:var(--gap-sm);min-height:0}
+
+/* ── 中間區再切兩半（2026-08-30，依使用者標註的版面）──────
+   左半：上「自選股 K 線」、下「台股大盤 K 線」
+   右半：全市場排行，整片高度給它
+
+   為什麼排行要吃滿高度：它是這頁真正的主角，一屏能看幾檔直接決定
+   這頁有沒有用。原本 K 線寫死 300px 高、排行只拿到剩下的空間，
+   在 1440 高的螢幕上排行只看得到 20 檔出頭。
+
+   兩張 K 線用 1fr 1fr 平分左半高度，不寫死 px——寫死的話換個螢幕
+   高度就會有一張被壓扁或溢出。 */
+#colC{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);
+  gap:var(--gap-sm)}
+/* ⚠ min-width:0 不能只寫 min-height:0。
+
+   flex／grid 子項的預設最小尺寸是 `auto`，也就是「不小於內容」。
+   排行表有 11 欄，內容寬度約 646px；在 1400 寬的視窗上 #cBoard 這格
+   只有 493px，於是面板被表格撐到 646px、**溢出到右欄上面**——
+   使用者回報的「視窗寬度到一定程度，GUI 元件會疊在一起」就是這個。
+
+   補上 min-width:0 之後面板可以縮，#boardWrap 的 overflow:auto 才會
+   真的生效（改成橫向捲動而不是把版面撐破）。 */
+#cKL{display:grid;grid-template-rows:1fr 1fr;gap:var(--gap-sm);
+  min-height:0;min-width:0}
+#cBoard{display:flex;min-height:0;min-width:0}
+#cKL .panel,#cBoard .panel{min-height:0;min-width:0}
+/* K 線容器高度由格線決定，元件再依實際高度繪製（見 drawKline） */
+#kbox,#twbox{flex:1;min-height:0}
+.grow{flex:1;min-height:0}
+.scroll{overflow-y:auto;overflow-x:hidden;min-height:0}
+
+/* ── 自選股列表 ── */
+.wl-row{display:flex;justify-content:space-between;align-items:center;
+  font-size:var(--fs-xs);padding:2px 5px;border-radius:var(--r-xs);cursor:pointer}
+.wl-row:hover{background:var(--raised)}
+.wl-row.sel{background:#2a2545}
+.wl-row .c{color:var(--sub)}
+
+/* 移除鈕：平常隱形，滑過該列才出現——常駐的話 72 個 × 會很吵，
+   而且刪除是低頻操作，不該一直佔視覺 */
+.wl-del{opacity:0;margin-left:6px;color:var(--muted);cursor:pointer;
+  padding:0 3px;transition:opacity .12s}
+.wl-row:hover .wl-del{opacity:1}
+.wl-del:hover{color:var(--red)}
+
+/* 搜尋建議 */
+#wl-suggest{margin:2px 0}
+.wl-sug-h{font-size:var(--fs-micro);color:var(--muted);padding:3px 5px 1px}
+.wl-sug{display:flex;justify-content:space-between;align-items:center;
+  font-size:var(--fs-xs);padding:3px 5px;border-radius:var(--r-flat);
+  cursor:pointer;color:var(--sub)}
+.wl-sug:hover{background:var(--raised);color:var(--text)}
+.wl-sug .c{color:var(--muted)}
+/* ETF 標記：0050 這種代號看起來跟個股沒兩樣，標一下免得誤加 */
+/* 實心底而不是描邊——其餘徽章（BUY/SELL/HOLD）都是實心的，
+   只有這一個描邊會顯得突兀，而且它是全站最後一條裝飾性框線。 */
+.wl-tag{font-size:var(--fs-micro);color:var(--blue);margin-left:4px;
+  background:var(--raised);border-radius:3px;padding:0 4px}
+
+#wl-toast{font-size:var(--fs-micro);color:var(--green);padding:0 5px;
+  opacity:0;transition:opacity .3s;min-height:14px}
+
+/* ── 行情表 ── */
+#boardWrap{overflow:auto;min-height:0;flex:1}
+
+/* ── 因子條列 ── */
+.fac{display:flex;align-items:center;gap:5px;margin-bottom:3px}
+.fac .k{font-size:var(--fs-tiny);width:12px;color:var(--muted)}
+.fac .v{font-size:var(--fs-tiny);width:36px;text-align:right}
+
+/* ── 新聞 ── */
+.nw{font-size:var(--fs-tiny);line-height:1.4;padding:3px 0;
+  border-bottom:1px solid #232338}
+.nw:last-child{border-bottom:none}
+
+/* ── 手機：三欄收成單欄堆疊 ── */
+@media (max-width:900px){
+  /* height:auto 不能省。只放開 overflow 的話，`html,body{height:100%}`
+     仍把兩者鎖在一個視窗高，#app 卻長到 2400px——結果是**body 變成捲動
+     容器而不是頁面本身**：`window.scrollTo()` 無效、只有 `body.scrollTop`
+     有反應。在真手機上這代表網址列不會自動收起、下拉重新整理失效、
+     點狀態列回到頂端也沒用。實測手機版 GitHub Pages 快照時抓到的。 */
+  html,body{overflow:auto;height:auto}
+  #app{height:auto;min-height:100vh}
+  /* minmax(0,1fr)：不加會被寬表格撐破，造成整頁橫向溢出 */
+  #main{grid-template-columns:minmax(0,1fr);height:auto}
+  #colL{order:2} #colC{order:1} #colR{order:3}
+  .scroll{max-height:45vh}
+  #boardWrap{max-height:60vh}
+  /* 手機沒有左右並排的空間：中間區收回單欄，兩張 K 線與排行直向堆疊，
+     高度改回寫死（沒有格線可以分配高度了）。 */
+  #colC{grid-template-columns:minmax(0,1fr);display:flex;flex-direction:column}
+  #cKL{display:flex;flex-direction:column}
+  #kbox,#twbox{height:220px;flex:0 0 auto}
+
+  /* 窄螢幕隱藏次要欄位，只留「代號/收盤/漲跌/綜合/訊號」 */
+  #board th:nth-child(1),#board td:nth-child(1),      /* # 名次 */
+  #board th:nth-child(7),#board td:nth-child(7),      /* 技 */
+  #board th:nth-child(8),#board td:nth-child(8),      /* 籌 */
+  #board th:nth-child(9),#board td:nth-child(9),      /* 情 */
+  #board th:nth-child(10),#board td:nth-child(10),    /* 基 */
+  #board th:nth-child(11),#board td:nth-child(11){    /* 量 */
+    display:none;
+  }
+}
+</style>
+<!-- tq.js 必須在 <head>：它最上面的嵌入偵測要在 <body> 開始解析前
+     就把 .embed 掛上去，否則導覽會先畫出來再消失（閃一下）。 -->
+<script src="./assets/tq.js?v=2026090106"></script>
+<script>
+/* ── 靜態快照模式 ────────────────────────────────────────
+   這是 GitHub Pages 上的快照，後面沒有 Flask。把所有對
+   /api/... 的 fetch 導到事先產生好的 JSON 檔。
+
+   覆寫 window.fetch 而不是改 tq.js，是為了讓線上版一行都不用動，
+   而且連沒走 TQ.api() 的裸 fetch 也一起接住。 */
+(function () {
+  window.TQ_STATIC = true;
+  var real = window.fetch.bind(window);
+  function keyFor(u) {
+    var parts = u.split('?'), p = parts[0], qs = parts[1] || '';
+    var key = p.replace(/^.*\/api\//, '').replace(/\/+$/, '').replace(/\//g, '_');
+    // 與產生端一致：先解碼再濾掉非 [0-9A-Za-z_]。
+    // `%5ETWII`（大盤 ^TWII）若原樣進檔名，請求時會被解碼成 `^` 而找不到檔案。
+    try { key = decodeURIComponent(key); } catch (e) {}
+    key = key.replace(/[^0-9A-Za-z_]/g, '');
+    if (qs) {
+      var q = new URLSearchParams(qs), extra = [];
+      ["days", "horizon", "limit", "by", "adj", "chain"].forEach(function (k) {
+        if (q.has(k)) extra.push(k + q.get(k));
+      });
+      if (extra.length) key += '_' + extra.join('_');
+    }
+    return key || 'index';
+  }
+  window.fetch = function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (url.indexOf('/api/') === -1) return real(input, init);
+    var method = ((init && init.method) || 'GET').toUpperCase();
+    if (method !== 'GET') {
+      // 下單、設警報、觸發更新在快照裡本來就做不到。
+      // 明確講出來，比讓它靜默失敗好。
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: '這是唯讀快照，無法執行寫入操作' }),
+        { status: 405, headers: { 'Content-Type': 'application/json' } }));
+    }
+    /* 先試精確檔名（含 days/limit 等參數），404 再退回不帶參數的版本。
+       快照不可能窮舉所有參數組合；退一步拿到「大致對」的資料，
+       比整塊顯示「載入失敗」有用得多。 */
+    var base = url.split('?')[0].replace(/^.*\/api\//, '')
+                 .replace(/\/+$/, '').replace(/\//g, '_');
+    try { base = decodeURIComponent(base); } catch (e) {}
+    base = base.replace(/[^0-9A-Za-z_]/g, '') || 'index';
+    var exact = keyFor(url);
+    /* 每次建置換一組網址。這些 JSON 沒有版本參數時，瀏覽器會一直用
+       快取——實測手機重新整理仍然看到 70 檔的舊排行，而伺服器上
+       其實已經是 1101 檔。HTML 有 GitHub Pages 的 10 分鐘上限，
+       但 JSON 可能快取更久，而且它才是真正的資料。 */
+    var p = real('./api/' + exact + '.json?v=202609040321', init);
+    if (exact === base) return p;
+    return p.then(function (r) {
+      return r.ok ? r : real('./api/' + base + '.json?v=202609040321', init);
+    });
+  };
+
+  /* 橫幅用 JS 插，不在產生階段改 HTML——四個頁面的標頭結構不同
+     （總覽沒有 h1），字串比對很容易只中一頁。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    var d = document.createElement('div');
+    d.innerHTML = "<div style=\"background:var(--card);border:1px solid var(--border);\n  border-left:3px solid var(--yellow);border-radius:var(--r-md);\n  padding:8px 14px;margin-bottom:var(--gap-md);font-size:var(--fs-sm);color:var(--sub)\">\n  <b style=\"color:var(--yellow)\">唯讀快照</b>\n  ——資料凍結於 <b>2026-09-04 03:21</b>，不會即時更新；下單、警報等寫入功能在此無效。\n  即時看盤請開本機的 <code>start_dashboard.bat</code>。\n</div>\n";
+    bar.insertAdjacentElement('afterend', d.firstElementChild);
+  });
+})();
+</script>
+</head><body>
+<div id="app">
+
+  <div id="topbar" class="topbar">
+    <span class="brand">台股量化</span>
+    <div class="nav">
+    <a href="./index.html" class="on">總覽</a>
+    <a href="./market.html">市場結構</a>
+    <a href="./network.html">關聯網路</a>
+    <a href="./stock_detail.html?sid=2330">個股深度</a>
+    <a href="./analytics.html">模型績效</a>
+    <a href="./learn.html">名詞解說</a>
+  </div>
+    <span id="regime" class="badge badge-HOLD">—</span>
+    <span class="mkt" id="mkt-twii">加權<b>—</b></span>
+    <span class="mkt" id="mkt-usdtwd">USD/TWD<b>—</b></span>
+    <span class="mkt" id="mkt-sox">SOX<b>—</b></span>
+    <span class="mkt" id="sigcount">—</span>
+    <span class="mkt" id="health" style="margin-left:auto"></span>
+    <span class="mkt" id="clock"></span>
+    <span class="theme-sw" id="themeSw"></span>
+</div>
+
+  <div id="main">
+
+    <!-- 左：自選股 -->
+    <div id="colL">
+      <div class="panel grow">
+        <div class="panel-h"><b>自選股</b>
+          <span><span id="wl-count"></span>
+            <button class="btn" onclick="wlClear()" title="清空後從零挑選">清空</button>
+          </span>
+        </div>
+        <input class="inp" id="wl-search" oninput="wlSearchInput()"
+               placeholder="搜尋代號或名稱，可加入">
+        <div id="wl-suggest"></div>
+        <div id="wl-toast"></div>
+        <div class="scroll grow" id="watchlist">
+          <div class="loading">載入中…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中：K線 + 行情表 -->
+    <!-- 中間區再切兩半：左邊上下兩張 K 線，右邊整片給排行 -->
+    <div id="colC">
+     <div id="cKL">
+      <div class="panel grow">
+        <div class="panel-h">
+          <span><b id="k-title">—</b>
+            <span id="k-price" style="margin-left:6px;font-size:var(--fs-lg);font-weight:600"></span>
+            <span id="k-chg" style="margin-left:4px;font-size:var(--fs-xs)"></span>
+          </span>
+          <span>
+            <button class="btn" onclick="setDays(60,this)">60</button>
+            <button class="btn on" onclick="setDays(120,this)">120</button>
+            <button class="btn" onclick="setDays(250,this)">250</button>
+            <a class="btn" id="k-detail" href="./stock_detail.html?sid=2330" style="text-decoration:none">深度分析 →</a>
+          </span>
+        </div>
+        <div id="kbox"></div>
+      </div>
+
+      <div class="panel grow">
+        <div class="panel-h">
+          <span><b>台股大盤</b>
+            <span id="tw-price" style="margin-left:6px;font-size:var(--fs-lg);font-weight:600"></span>
+            <span id="tw-chg" style="margin-left:4px;font-size:var(--fs-xs)"></span>
+          </span>
+          <span id="tw-regime" class="mkt"></span>
+        </div>
+        <div id="twbox"></div>
+      </div>
+     </div>
+
+     <div id="cBoard">
+      <div class="panel grow">
+        <div class="panel-h">
+          <b>全市場行情</b>
+          <span>
+            <button class="btn on" onclick="setFilter('all',this)">全部</button>
+            <button class="btn" onclick="setFilter('BUY',this)">買進</button>
+            <button class="btn" onclick="setFilter('SELL',this)">賣出</button>
+            <span id="board-date" style="margin-left:6px"></span>
+          </span>
+        </div>
+        <div id="boardWrap">
+          <table class="tbl" id="board">
+            <thead><tr>
+              <th data-k="rank">#</th>
+              <th data-k="stock_id" style="text-align:left">代號</th>
+              <th data-k="close">收盤</th>
+              <th data-k="chg_pct">漲跌</th>
+              <th data-k="score">綜合</th>
+              <th data-k="signal">訊號</th>
+              <th data-k="tech">技</th>
+              <th data-k="chip">籌</th>
+              <th data-k="sent">情</th>
+              <th data-k="fund">基</th>
+              <th data-k="volume">量(張)</th>
+            </tr></thead>
+            <tbody><tr><td colspan="11" class="loading">載入中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+     </div>
+    </div>
+
+    <!-- 右：因子 + AI + 新聞 + 模型 -->
+    <div id="colR">
+      <div class="panel" style="flex:0 0 auto">
+        <div class="panel-h"><b>四因子</b><span id="fac-sid"></span></div>
+        <div id="factors"><div class="loading">—</div></div>
+      </div>
+
+      <div class="panel" style="flex:0 0 auto">
+        <div class="panel-h"><b>AI 觀點</b><span id="ai-date"></span></div>
+        <div id="ai" style="font-size:var(--fs-tiny);line-height:1.5;color:var(--sub)">—</div>
+      </div>
+
+      <div class="panel grow">
+        <div class="panel-h"><b>新聞</b>
+          <span><button class="btn" id="nw-all" onclick="setNews('all',this)">全</button>
+          <button class="btn" onclick="setNews('positive',this)">利多</button>
+          <button class="btn" onclick="setNews('negative',this)">利空</button></span>
+        </div>
+        <div class="scroll grow" id="news"><div class="loading">載入中…</div></div>
+      </div>
+
+      <div class="panel" style="flex:0 0 auto">
+        <div class="panel-h"><b>模型績效</b></div>
+        <div id="tracker" style="font-size:var(--fs-tiny);color:var(--sub)">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="./assets/kline.js?v=2026090106"></script>
+<script>
+let boardRows = [], wlRows = [], curSid = '2330', curDays = 120, curFilter = 'all';
+let sortKey = 'rank', sortDir = 1, klineHandle = null, newsFilter = 'all';
+
+setInterval(() => {
+  TQ.html('clock', new Date().toLocaleTimeString('zh-TW', {hour12:false}));
+}, 1000);
+
+/* ── 頂部：大盤 + regime + 健康 ── */
+async function loadTop() {
+  const m = await TQ.api('/api/market');
+  if (!m._error) {
+    for (const [k, label] of [['twii','加權'],['usdtwd','USD/TWD'],['sox','SOX']]) {
+      const v = m[k] || {};
+      const cls = v.change > 0 ? 'up' : v.change < 0 ? 'down' : '';
+      TQ.html('mkt-' + k,
+        `${label}<b class="${cls}">${TQ.num(v.value,2)}</b> ` +
+        `<span class="${cls}">${TQ.pctRaw(v.change_pct)}</span>`);
+    }
+  }
+  const w = await TQ.api('/api/warroom?top=1');
+  if (w._error) return;
+  const rg = w.regime || {}, sc = w.signal_counts || {}, tk = w.tracker || {};
+  const code = rg.code || '';
+  const badge = code.includes('bull') ? 'badge-BUY' : code.includes('bear') ? 'badge-SELL' : 'badge-HOLD';
+  const el = TQ.el('regime');
+  el.className = 'badge ' + badge;
+  el.textContent = rg.label || '—';
+  TQ.html('sigcount',
+    `<span class="up">買 ${sc.BUY||0}</span> · <span class="down">賣 ${sc.SELL||0}</span> · 觀望 ${sc.HOLD||0}`);
+  TQ.html('health', (w.health||[]).map(h => {
+    const c = h.status==='ok' ? '--green' : h.status==='stale' ? '--yellow' : '--red';
+    return `<span title="${h.label} ${h.date||'無'}"><span class="dot" style="background:${TQ.cssVar(c)}"></span> ${h.label}</span>`;
+  }).join(' '));
+  const ai = w.ai || {};
+  TQ.html('ai', ai.summary ? TQ.esc(ai.summary) : '尚無 AI 分析（需設定 ANTHROPIC_API_KEY）');
+  TQ.html('ai-date', ai.date || '');
+  if (tk.ready) {
+    const cls = tk.avg_spread > 0 ? 'up' : 'down';
+    TQ.html('tracker',
+      `近 ${tk.n_days} 日　多空價差 <b class="${cls}">${TQ.pct(tk.avg_spread)}</b><br>` +
+      `IC ${TQ.signed(tk.mean_ic,3)}　勝率 ${TQ.pct(tk.ic_hit,0,false)}`);
+  } else {
+    TQ.html('tracker', '樣本累積中');
+  }
+}
+
+/* ── 行情表 + 自選股（同一份資料）── */
+async function loadBoard() {
+  const d = await TQ.api('/api/board');
+  if (d._error || !d.rows) {
+    TQ.html('board', '<tbody><tr><td colspan="11" class="loading">載入失敗</td></tr></tbody>');
+    return;
+  }
+  boardRows = d.rows;
+  // 涵蓋率必須寫在表頭上。這張表混著「四因子齊全」與「只有技術面」
+  // 的股票，不講清楚就會被當成同一種東西比較。
+  const cv = d.coverage;
+  TQ.html('board-date', (d.date || '') + (cv
+    ? ` · ${cv.total} 檔（籌碼 ${cv.chip}・基本 ${cv.fund}・情緒 ${cv.sent}）`
+    : ''));
+  renderBoard();
+
+  // 自選股清單獨立取。行情表讀的是 daily_rankings（排程產生的快照），
+  // 新加入的股票要等下次排程重算排名才會出現在裡面——但「籃子」是
+  // 使用者自己的清單，不該綁在排名快照上。分開取之後，剛加入的股票
+  // 立刻看得到，行情欄位等資料到了再補上。
+  const wl = await TQ.api('/api/watchlist');
+  wlRows = Array.isArray(wl) ? wl : [];
+  TQ.html('wl-count', wlRows.length + ' 檔');
+  renderWatchlist();
+
+  if (boardRows.length) selectStock(curSid || boardRows[0].stock_id);
+}
+
+/* 因子欄：**沒有資料時顯示「—」，不是 +0.00**。
+
+   全市場排名裡約 93% 的股票只有技術面（實測 1101 檔中 1025 檔），
+   籌碼／情緒／基本面根本沒抓過那些股票。把「沒資料」畫成中性分數，
+   使用者會拿它跟四因子齊全的股票並排比較——那是工具在說謊。
+
+   `r.factors` 是位元遮罩（1 技／2 籌／4 情／8 基），由後端依各因子的
+   來源表**有沒有這檔的資料**判定，不是看分數是不是 0（分數 0 可能是
+   真的中性）。 */
+function fac(r, key, bit) {
+  const has = (r.factors === undefined) || ((r.factors || 0) & bit);
+  if (!has) return '<td class="num faint" title="這檔股票沒有這個因子的資料">—</td>';
+  return `<td class="num ${TQ.signClass(r[key])}">${TQ.signed(r[key], 2)}</td>`;
+}
+
+function renderBoard() {
+  let rows = curFilter === 'all' ? boardRows : boardRows.filter(r => r.signal === curFilter);
+  rows = TQ.sortBy(rows, sortKey, sortDir);
+  const body = rows.map(r => {
+    const cls = TQ.signClass(r.chg_pct);
+    const dlt = r.rank_delta > 0 ? `<span class="up">▲${r.rank_delta}</span>`
+              : r.rank_delta < 0 ? `<span class="down">▼${-r.rank_delta}</span>` : '';
+    return `<tr class="${r.stock_id===curSid?'sel':''}" onclick="selectStock('${r.stock_id}')">
+      <td class="num muted">${r.rank} ${dlt}</td>
+      <td><b>${r.stock_id}</b> <span class="muted">${TQ.esc((r.name||'').slice(0,4))}</span></td>
+      <td class="num">${TQ.num(r.close,2)}</td>
+      <td class="num ${cls}">${TQ.pctRaw(r.chg_pct)}</td>
+      <td class="num ${TQ.signClass(r.score)}">${TQ.signed(r.score,3)}</td>
+      <td><span class="badge badge-${r.signal}">${r.signal}</span></td>
+      ${fac(r, 'tech', 1)}${fac(r, 'chip', 2)}${fac(r, 'sent', 4)}${fac(r, 'fund', 8)}
+      <td class="num muted">${TQ.vol(r.volume)}</td>
+    </tr>`;
+  }).join('');
+  TQ.el('board').querySelector('tbody').innerHTML =
+    body || '<tr><td colspan="11" class="loading">無符合條件</td></tr>';
+}
+
+function renderWatchlist() {
+  const q = (TQ.el('wl-search').value || '').trim();
+  // 行情資料以代號為鍵併進來；查不到就顯示「—」，代表資料還沒到
+  const mkt = Object.fromEntries(boardRows.map(r => [r.stock_id, r]));
+  const list = q ? wlRows.filter(r =>
+      r.code.includes(q) || (r.name||'').includes(q)) : wlRows;
+
+  TQ.html('watchlist', list.map(w => {
+    const r = mkt[w.code];
+    const chg = r ? `<span class="${TQ.signClass(r.chg_pct)}">${TQ.pctRaw(r.chg_pct)}</span>`
+                  : '<span class="c">—</span>';
+    return `
+    <div class="wl-row ${w.code===curSid?'sel':''}" onclick="selectStock('${w.code}')">
+      <span><b>${w.code}</b> <span class="c">${TQ.esc((w.name||'').slice(0,4))}</span></span>
+      <span>${chg}
+        <span class="wl-del" title="從自選股移除"
+              onclick="event.stopPropagation();wlRemove('${w.code}')">×</span>
+      </span>
+    </div>`;
+  }).join('') || '<div class="loading">無符合</div>');
+}
+
+/* ── 自選股增刪 ────────────────────────────────────────────
+   在此之前網頁只能看不能改，要增刪得開桌面版。而自選股清單是整個
+   系統的輸入（排程只處理清單裡的股票），所以能在手機上直接調整，
+   實際價值比看起來大。
+
+   搜尋框做兩件事：符合清單的就篩選（原本的行為），不在清單裡的
+   則出現「＋ 加入」——人記得住的是「台積電」不是「2330」，所以
+   搜尋要吃名稱。 */
+let wlTimer = null;
+
+function wlSearchInput() {
+  renderWatchlist();
+  clearTimeout(wlTimer);
+  wlTimer = setTimeout(wlSuggest, 250);   // 打字停下來才查，不要每個鍵都打 API
+}
+
+async function wlSuggest() {
+  const q = (TQ.el('wl-search').value || '').trim();
+  const box = TQ.el('wl-suggest');
+  if (q.length < 1) { box.innerHTML = ''; return; }
+
+  // 用 wlRows（真正的自選股）而不是 boardRows（行情表）。
+  // 行情表讀的是 daily_rankings 快照——清空自選股之後它還留著清空前的
+  // 72 檔，拿它來過濾的話 0050 會被當成「已在清單中」而不出現在建議裡，
+  // 使用者看到的是「搜尋 0050 沒有結果」。實際踩到過：把自選股改成
+  // 獨立的 wlRows 時，只改了 renderWatchlist，漏掉這裡。
+  const have = new Set(wlRows.map(r => r.code));
+  const res = await TQ.api('/api/stock_search?q=' + encodeURIComponent(q));
+  const hits = (Array.isArray(res) ? res : []).filter(s => !have.has(s.code));
+  if (!hits.length) { box.innerHTML = ''; return; }
+
+  box.innerHTML = '<div class="wl-sug-h">加入自選股</div>' + hits.slice(0, 6).map(s => `
+    <div class="wl-sug" onclick="wlAdd('${s.code}')">
+      <span><b>${s.code}</b> <span class="c">${TQ.esc(s.name)}</span>${
+        s.type === 'etf' ? '<span class="wl-tag">ETF</span>' : ''
+      }</span><span>＋</span>
+    </div>`).join('');
+}
+
+async function wlAdd(code) {
+  const r = await fetch('/api/watchlist', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({code})
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { wlToast(j.error || j.message || '加入失敗'); return; }
+  wlToast(`已加入 ${code} ${j.name || ''}`);
+  TQ.el('wl-search').value = '';
+  TQ.el('wl-suggest').innerHTML = '';
+  await loadBoard();
+}
+
+async function wlRemove(code) {
+  const r = await fetch('/api/watchlist/' + encodeURIComponent(code), {method: 'DELETE'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { wlToast(j.error || j.message || '移除失敗'); return; }
+  wlToast(`已移除 ${code}`);
+  await loadBoard();
+}
+
+async function wlClear() {
+  // 清空是不可逆的（軟刪除，但要一檔檔加回來），一定要問一次。
+  // 而且要講清楚後果：空清單時排程會退回預設 10 檔。
+  if (!confirm(`確定清空全部 ${wlRows.length} 檔自選股？\n\n`
+             + '清空後到你挑好之前，排程會暫時使用預設清單。')) return;
+  const r = await fetch('/api/watchlist', {method: 'DELETE'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { wlToast(j.error || j.message || '清空失敗'); return; }
+  wlToast(j.message || '已清空');
+  await loadBoard();
+}
+
+function wlToast(msg) {
+  // 唯讀快照（GitHub Pages）沒有後端，POST/DELETE 會回 405。
+  // 與其顯示看不懂的錯誤，不如直接說明白。
+  const t = TQ.el('wl-toast');
+  t.textContent = window.TQ_STATIC ? '唯讀快照無法修改自選股，請用本機版' : msg;
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 2600);
+}
+
+/* ── 選股：連動 K 線 + 四因子 ── */
+async function selectStock(sid) {
+  curSid = sid;
+  document.querySelectorAll('.wl-row, .tbl tbody tr').forEach(e => e.classList.remove('sel'));
+  renderBoard(); renderWatchlist();
+  const row = boardRows.find(r => r.stock_id === sid) || {};
+  TQ.html('k-title', `${sid} ${TQ.esc(row.name||'')}`);
+  TQ.html('k-price', TQ.num(row.close,2));
+  const cls = TQ.signClass(row.chg_pct);
+  TQ.html('k-chg', `<span class="${cls}">${TQ.pctRaw(row.chg_pct)}</span>`);
+  TQ.el('k-detail').href = '/stock/' + sid;
+  TQ.html('fac-sid', sid);
+  TQ.html('factors', [['技',row.tech],['籌',row.chip],['情',row.sent],['基',row.fund]]
+    .map(([k,v]) => `<div class="fac"><span class="k">${k}</span>${TQ.bar(v)}
+      <span class="v ${TQ.signClass(v)}">${TQ.signed(v,2)}</span></div>`).join(''));
+  drawKline();
+}
+
+async function drawKline() {
+  if (klineHandle) { klineHandle.destroy(); klineHandle = null; }
+  klineHandle = await TQKline.load('kbox', `/api/kline/${curSid}?days=${curDays}`,
+                                   { height: TQ.el('kbox').clientHeight || 300 });
+}
+
+/* ── 台股大盤 K 線 ──────────────────────────────────────────
+   代號沿用 stock_list 既有的 `^TWII`，**一定要 encodeURIComponent**：
+   `^` 在網址路徑裡不編碼的話，伺服器收到的是別的東西，直接 404。
+
+   大盤歷史是 2026-08-30 才補進資料庫的（在那之前 stock_price 裡
+   一筆大盤資料都沒有，`^TWII` 只存在於清單種子）。
+   資料源是證交所 MI_5MINS_HIST（開高低收）+ FMTQIK（成交量）。 */
+const TWII = encodeURIComponent('^TWII');
+let twHandle = null;
+
+async function drawTwii() {
+  const box = TQ.el('twbox');
+  if (!box) return;
+  if (twHandle) { twHandle.destroy(); twHandle = null; }
+  twHandle = await TQKline.load('twbox', `/api/kline/${TWII}?days=${curDays}`,
+                                { height: box.clientHeight || 260 });
+  // 標頭的指數與漲跌：跟大盤徽章同一份資料，不另外打 API
+  const d = await TQ.api(`/api/kline/${TWII}?days=${curDays}`);
+  const c = d && d.candles;
+  if (c && c.length >= 2) {
+    const last = c[c.length - 1], prev = c[c.length - 2];
+    const chg = prev.close ? (last.close - prev.close) / prev.close * 100 : 0;
+    TQ.html('tw-price', TQ.num(last.close, 2));
+    const el = TQ.el('tw-chg');
+    if (el) {
+      el.textContent = TQ.pctRaw(chg);
+      el.className = TQ.signClass(chg);
+    }
+  }
+}
+
+function setDays(d, btn) {
+  curDays = d;
+  // 只清掉「自選股 K 線」那張面板的天數鈕。原本用 `#colC .panel-h .btn`
+  // 掃整個中間區——大盤 K 線與排行的按鈕也在裡面，會被一起清掉高亮。
+  const host = TQ.el('kbox') && TQ.el('kbox').parentElement;
+  if (host) host.querySelectorAll('.panel-h .btn').forEach(b => {
+    if (!b.href) b.classList.remove('on');
+  });
+  if (btn) btn.classList.add('on');
+  drawKline();
+  drawTwii();          // 兩張圖用同一個天數，看起來才對得起來
+}
+
+function setFilter(f, btn) {
+  curFilter = f;
+  btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  renderBoard();
+}
+
+/* ── 表頭排序 ── */
+document.querySelectorAll('#board thead th').forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.k;
+    if (sortKey === k) sortDir = -sortDir;
+    else { sortKey = k; sortDir = (k === 'rank' || k === 'stock_id') ? 1 : -1; }
+    document.querySelectorAll('#board thead th').forEach(x => x.classList.remove('sorted'));
+    th.classList.add('sorted');
+    renderBoard();
+  };
+});
+/* 這裡曾經有一行 `TQ.el('wl-search').oninput = renderWatchlist;`
+   —— 那是「搜尋框只用來篩選現有清單」時代的接線。後來搜尋框多了
+   「查資料庫、把不在清單裡的股票加進來」的功能，改用 HTML 上的
+   `oninput="wlSearchInput()"`，但這一行沒刪。
+
+   它在載入時執行，**直接覆蓋掉 inline handler**（`el.oninput = fn`
+   和 `oninput="..."` 是同一個插槽，後寫的贏）。結果是打字只會篩選
+   現有清單，永遠不會去查 API：搜 2454 時 1 檔的清單被篩成「無符合」，
+   而且沒有任何「＋ 加入」建議 —— 使用者看到的就是「自選股無法搜尋」。
+
+   教訓跟自選股面板踩過的是同一個：**同一件事不要接兩次線**。
+   由 tests/test_watchlist_api.py::test_search_box_is_wired_only_once 把關。 */
+
+/* ── 新聞 ── */
+async function loadNews() {
+  const d = await TQ.api(`/api/news?filter=${newsFilter}&limit=25`);
+  if (d._error || !Array.isArray(d)) { TQ.html('news','<div class="loading">載入失敗</div>'); return; }
+  TQ.html('news', d.map(n => {
+    const lbl = n.sentiment_label || 'neutral';
+    const c = lbl==='positive' ? '--green' : lbl==='negative' ? '--red' : '--muted';
+    return `<div class="nw"><span class="dot" style="background:${TQ.cssVar(c)}"></span>
+      ${TQ.esc(n.title||'')}
+      <div class="muted" style="font-size:var(--fs-micro)">${TQ.esc(n.source||'')} ${String(n.published_at||'').slice(5,16)}</div>
+    </div>`;
+  }).join('') || '<div class="loading">無新聞</div>');
+}
+function setNews(f, btn) {
+  newsFilter = f;
+  btn.parentElement.querySelectorAll('.btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  loadNews();
+}
+
+/* ── 初始化 ── */
+TQ.el('nw-all').classList.add('on');
+loadTop();
+loadBoard();
+loadNews();
+drawTwii();
+setInterval(loadTop, 5*60*1000);
+
+/* 這裡原本掛了一個「視窗高度變了就重畫兩張 K 線」的處理器，
+   而且**只看高度**——視窗只變寬時完全不觸發，圖表就停在舊寬度。
+
+   現在改由 kline.js 裡的 ResizeObserver 直接盯容器：寬高都會跟著調，
+   而且不必重新打 API（資料沒變，重畫只是浪費一次網路）。
+   所以這裡什麼都不用做。 */
+</script>
+</body></html>
