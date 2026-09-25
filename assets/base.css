@@ -1,0 +1,350 @@
+/* ═══════════════════════════════════════════════════════
+   共用元件樣式 —— 三個本機頁 + 雲端頁共用
+   （原本各頁複製約 126 行 CSS，色碼重複 36 次）
+   ═══════════════════════════════════════════════════════ */
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:var(--font-ui);
+  -webkit-font-smoothing:antialiased;   /* 高對比下更銳利 */
+  text-rendering:optimizeLegibility;
+  font-size:var(--fs-md);
+}
+a{color:var(--blue);text-decoration:none}
+
+/* ── 語意色 ── */
+.up{color:var(--green)} .down{color:var(--red)} .flat{color:var(--yellow)}
+.muted{color:var(--muted)} .sub{color:var(--sub)}
+/* 最淡的一階。用在「這裡沒有資料」而不是「這個數字很小」。 */
+.faint{color:var(--faint)}
+
+/* ── 卡片 / 面板 ── */
+.card{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:var(--r-md);
+}
+.panel{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--gap-sm) var(--gap-md);
+  display:flex; flex-direction:column; min-height:0;
+}
+.panel-h{
+  font-size:var(--fs-tiny); color:var(--muted);
+  letter-spacing:.5px; margin-bottom:var(--gap-xs);
+  display:flex; justify-content:space-between; align-items:center;
+  flex-shrink:0;
+}
+.panel-h b{color:var(--purple);font-weight:600}
+
+/* ── 徽章 ── */
+.badge{
+  font-size:var(--fs-tiny); font-weight:700;
+  padding:1px 7px; border-radius:9px; display:inline-block;
+}
+.badge-BUY,.badge-buy{background:#0d3a18;color:var(--green)}
+.badge-SELL,.badge-sell{background:#3a1210;color:var(--red)}
+.badge-HOLD,.badge-hold{background:#3a3208;color:var(--yellow)}
+
+/* ── 終端級表格（一屏看更多的核心）── */
+.tbl{width:100%;border-collapse:collapse;font-size:var(--fs-xs)}
+.tbl thead th{
+  position:sticky; top:0; z-index:2;
+  background:var(--deep); color:var(--muted);
+  font-size:var(--fs-tiny); font-weight:600; text-align:right;
+  padding:4px 6px; white-space:nowrap;
+  border-bottom:1px solid var(--border); cursor:pointer;
+  user-select:none;
+}
+.tbl thead th:first-child{text-align:left}
+.tbl thead th:hover{color:var(--purple)}
+.tbl thead th.sorted{color:var(--purple)}
+.tbl tbody td{
+  padding:0 6px; height:var(--row-h);
+  text-align:right; white-space:nowrap;
+  border-bottom:1px solid #232338;
+}
+.tbl tbody td:first-child{text-align:left}
+.tbl tbody tr{cursor:pointer}
+.tbl tbody tr:hover td{background:var(--raised)}
+.tbl tbody tr.sel td{background:#2a2545}
+.num{font-variant-numeric:tabular-nums}  /* 數字等寬，欄位才對齊 */
+
+/* ── 迷你因子條 ── */
+.bars{display:flex;gap:2px}
+.bar{flex:1;height:4px;border-radius:2px;background:var(--border);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:2px}
+
+/* ── 按鈕 / 輸入 ── */
+.btn{
+  background:var(--border); color:var(--text);
+  border:1px solid var(--border-hi); border-radius:var(--r-sm);
+  padding:3px 10px; font-size:var(--fs-xs); cursor:pointer;
+}
+.btn:hover{background:var(--border-hi)}
+.btn.on{background:var(--border-hi);color:var(--purple);font-weight:600}
+.inp{
+  background:var(--deep); color:var(--text);
+  border:1px solid var(--border-hi); border-radius:var(--r-sm);
+  padding:4px 8px; font-size:var(--fs-xs); width:100%;
+}
+.inp::placeholder{color:var(--faint)}
+
+/* ── 狀態 ── */
+.loading{text-align:center;padding:20px;color:var(--muted);font-size:var(--fs-sm)}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+
+/* ── 捲動條（終端風格：細）── */
+::-webkit-scrollbar{width:7px;height:7px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+
+/* ══ 全站導覽列 ══════════════════════════════════════════
+   四個頁面的導覽**必須長得一模一樣**，否則同一個按鈕會在每頁
+   跳到不同位置，使用者的肌肉記憶完全失效。
+
+   修正前實測（同一個「📖 名詞解說」）：
+     總覽      → topbar 最右端，第 2 個，用 .btn 樣式
+     個股深度  → **根本沒有這個連結**
+     模型績效  → 第 4 個
+     名詞解說  → 第 3 個
+   而且個股深度頁把「目前所在頁」的高亮用 inline style 標在
+   「模型績效」上（標錯頁），因為那頁的 CSS 根本沒有 .nav a.on。
+
+   規則：品牌 → 四個連結（固定順序）→ 頁面專屬內容靠右。
+   品牌不能省——沒有它，導覽在總覽頁會從 x≈110 起算、
+   其他頁從 x≈8 起算，還是對不齊。                        */
+/* 卡片式標頭：四頁用同一組內距與邊框，導覽的左緣才會落在同一條線上。
+   （曾經 dashboard 的左緣 = #app 內距 8 + 邊框 1 + 內距 12 = 21px，
+     其餘頁 = body 內距 16 + 0 + 0 = 16px，差 5px；
+     再加上 gap 12 vs 8 又差 4px，合計 9px。）*/
+.topbar{display:flex;gap:var(--gap-sm);align-items:center;flex-wrap:wrap;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--r-md);padding:5px var(--gap-md);
+  margin-bottom:var(--gap-md)}
+/* 標頭列裡的輸入框必須跟導覽鈕一樣高（36px）。
+   否則 align-items:center 會把導覽往下推——實測搜尋框 40px 時
+   個股深度頁與名詞解說頁的導覽比模型績效頁低 2px。 */
+.topbar .inp,
+.topbar .searchbar input,
+.topbar .searchbar button{height:36px;box-sizing:border-box}
+.brand{font-size:var(--fs-md);font-weight:600;color:var(--purple);
+  white-space:nowrap}
+.nav{display:flex;gap:var(--gap-sm);flex-wrap:wrap}
+.nav a{background:var(--border);color:var(--text);
+  border:1px solid var(--border-hi);border-radius:var(--r-md);
+  padding:7px 14px;font-size:var(--fs-md);
+  text-decoration:none;white-space:nowrap}
+.nav a:hover{border-color:var(--purple)}
+.nav a.on{background:var(--border-hi);color:var(--purple);font-weight:600}
+
+/* ══ 頁面外殼 ══════════════════════════════════════════════
+   四頁的內容左右緣必須落在同一條線上，否則切換頁面時整片內容
+   會橫向位移。實測修正前（3440 寬）：
+     總覽 16px｜個股深度 31px｜**模型績效 431px**｜名詞解說 31px
+   總覽是全幅終端版面，它的外殼套在 #app 上（body 內距為 0），
+   幾何結果相同。                                              */
+/* 永遠保留捲軸槽。總覽是 overflow:hidden（無捲軸）、其餘頁會捲動
+   （捲軸 7px），置中之後左緣就差了半個捲軸寬 = 3px。
+   保留槽位讓四頁的可用寬度一致，切換時不會有 3px 的抖動。 */
+html{scrollbar-gutter:stable}
+body{max-width:var(--page-max);margin:0 auto;padding:var(--gap-lg)}
+
+/* 頁標題：模型績效與名詞解說各寫一份，margin-bottom 已經差了 2px */
+h1{font-size:var(--fs-xl);color:var(--purple);margin-bottom:var(--gap-xs)}
+.sub{font-size:var(--fs-sm);color:var(--muted);margin-bottom:var(--gap-lg)}
+
+/* ══ 嵌入模式（桌面版 QWebEngineView）════════════════════════
+   桌面版已經有 PyQt 分頁列，頁內導覽是多餘的，而且點下去會讓
+   分頁載入別的頁面（標題還是「總覽」、內容卻變成模型績效）。
+
+   只藏導覽與品牌，**不藏整條標頭列**——它還裝著各頁自己的東西：
+     總覽：大盤徽章、匯率、SOX、時鐘
+     個股深度：股票代號搜尋框
+   模型績效的標頭列只有品牌與導覽，藏掉之後會剩一個空殼，
+   所以那條額外標記 .nav-only 整條隱藏。                        */
+html.embed .brand,
+html.embed .nav{display:none}
+html.embed .topbar.nav-only{display:none}
+
+/* ══ 極簡主題 ═══════════════════════════════════════════════
+   整段可以直接刪掉還原成原本的樣子。
+
+   三個原則：
+     1. **不用描邊分區塊**，用底色明度差
+     2. **保留有功能的線**（表格列分隔），去掉裝飾性的
+     3. 圓角統一收斂，按鈕與輸入框去框線
+   ═══════════════════════════════════════════════════════ */
+.card, .panel{
+  border:none;
+  border-radius:var(--r-flat);
+  background:var(--card);
+}
+/* 表頭原本靠底線與內容分開，改用留白 */
+.panel-h{
+  border-bottom:none;
+  padding-bottom:2px;
+  margin-bottom:var(--gap-sm);
+  letter-spacing:.3px;
+}
+/* 表格：只留列分隔，而且壓到幾乎看不見 */
+.tbl thead th{
+  border-bottom:1px solid var(--hairline);
+  background:transparent;
+}
+.tbl tbody tr{border-bottom:1px solid var(--hairline)}
+.tbl tbody tr:last-child{border-bottom:none}
+.tbl tbody tr:hover{background:var(--raised)}
+
+/* 按鈕：去掉框線，靠底色與 hover 表達可點 */
+.btn{
+  border:none;
+  background:var(--raised);
+  color:var(--sub);
+  border-radius:var(--r-flat);
+}
+.btn:hover{background:var(--border);color:var(--text)}
+.btn.on{background:var(--border-hi);color:var(--text)}
+
+/* 輸入框：底線式，不是四邊框 */
+.inp{
+  border:none;
+  border-bottom:1px solid var(--border);
+  border-radius:0;
+  background:transparent;
+  padding-left:2px;
+}
+.inp:focus{outline:none;border-bottom-color:var(--purple)}
+
+/* 標頭列與導覽：去掉分隔線，用間距分開。
+
+   ⚠ 這裡原本只寫 `border-bottom:none`，但上面 .topbar 的定義是
+   `border:1px solid var(--border)` **四邊**——只關掉底邊，上、左、右
+   那三條還在。實測 #topbar 的 computed border 是 `1px 1px 0px 1px`，
+   標頭列在畫面上仍是一個有框的盒子。
+   卡片一律不描邊，靠底色分層，所以整個關掉。 */
+.topbar{border:none;padding-bottom:var(--gap-sm)}
+.nav a{border:none;border-radius:var(--r-flat)}
+
+/* 徽章：實心小塊，不描邊 */
+.badge{border:none}
+
+/* ══ 數字排版 ═══════════════════════════════════════════════
+   股價、百分比、分數一律等寬數字。沒有這個的話，捲動表格時
+   同一欄的數字會左右微跳（1 比 8 窄），看久了很累。 */
+.tbl, .num, .mkt b, #k-price, .fac .v{
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum" 1;
+}
+/* 大數字用稍緊的字距，小標籤用稍鬆的——這是原生介面的排版習慣 */
+h1, #k-price{letter-spacing:-.02em}
+.panel-h, .wl-sug-h{letter-spacing:.04em;text-transform:none}
+
+
+/* ══ 力導向關聯網路圖（TQGraph）═══════════════════════════
+   名詞解說與產業網路兩頁共用同一個元件，樣式就只能有一份。
+   容器（#net 的大小、背景）留給各頁自己定，因為兩頁的版面不同。 */
+.tqg-edge{stroke:var(--border-hi);stroke-width:1;opacity:.5}
+.tqg-node{cursor:pointer}
+.tqg-node circle{transition:none}
+.tqg-lbl{font-size:11px;fill:var(--sub);pointer-events:none;
+  paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round;
+  opacity:0}
+.tqg-lbl.always{opacity:1}
+svg.tqg.zoomed .tqg-lbl{opacity:1}          /* 放大後全部標籤打開 */
+.tqg-node:hover .tqg-lbl,
+.tqg-node.hot .tqg-lbl{opacity:1;fill:var(--text)}
+/* 聚焦模式：只留相關的，其餘淡出——不然 273 條線全亮著看不出重點 */
+svg.tqg.focusing .tqg-node.dim{opacity:.14}
+svg.tqg.focusing .tqg-edge.dim{opacity:.05}
+svg.tqg.focusing .tqg-edge.hot{stroke:var(--purple);stroke-width:2;opacity:1}
+.tqg-node.hot circle{stroke-width:3.4}
+.tqg-node.off,.tqg-edge.off{display:none}
+/* 篩選時的「鄰居」樣式：看得到但退居背景，
+   跟 hover 的 .dim 分開是因為 .dim 只在 svg.focusing 下生效，
+   兩者同時作用會互相蓋掉 */
+.tqg-node.faint{opacity:.32}
+.tqg-node.faint .tqg-lbl{opacity:0}
+
+/* ══ 主題：玻璃層 ═══════════════════════════════════════════
+   這一段對兩個主題都套用。高對比版把 --glass-* 設成
+   transparent/none，所以它算出來跟原本完全一樣；玻璃版才會真的
+   出現半透明、模糊與亮邊。這樣元件不必到處寫「如果是玻璃主題」。 */
+body{background:var(--page-bg);background-attachment:fixed}
+
+.card, .panel, .st, #cov, #side, #net, #bubbleWrap, #detail,
+#mapBox, .stat{
+  background:var(--surface);
+  -webkit-backdrop-filter:var(--glass-blur);
+  backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-shadow);
+}
+/* 亮邊用 outline 而不是 border：border 會改變盒模型尺寸，
+   換主題時整個版面會位移 1px。outline 不佔空間。 */
+:root[data-theme="glass"] .card,
+:root[data-theme="glass"] .panel,
+:root[data-theme="glass"] .st,
+:root[data-theme="glass"] #cov,
+:root[data-theme="glass"] #side,
+:root[data-theme="glass"] #net,
+:root[data-theme="glass"] #bubbleWrap,
+:root[data-theme="glass"] #detail,
+:root[data-theme="glass"] #mapBox,
+:root[data-theme="glass"] .stat{
+  outline:1px solid var(--glass-line);
+  outline-offset:-1px;
+}
+
+/* ══ 主題切換鈕 ═════════════════════════════════════════════ */
+.theme-sw{display:inline-flex;gap:2px;padding:3px;border-radius:var(--r-md);
+  background:var(--raised);margin-left:auto}
+.theme-btn{border:none;background:transparent;color:var(--muted);
+  font-family:inherit;font-size:var(--fs-micro);padding:5px 11px;
+  border-radius:calc(var(--r-md) - 3px);cursor:pointer;white-space:nowrap;
+  transition:background .18s ease,color .18s ease}
+.theme-btn:hover{color:var(--text)}
+.theme-btn.on{background:var(--border);color:var(--text)}
+/* 桌面版嵌入時不顯示：PyQt 有自己的主題切換，兩套會打架 */
+html.embed .theme-sw{display:none}
+
+/* ══ TQGraph 入場動畫 ═══════════════════════════════════════
+   節點畫在**最終位置**上，只有縮放與透明度在動——位置從頭到尾
+   沒被動過。這點很重要：佈局是一次算完的（rAF 在隱藏分頁不觸發，
+   分批跑會停在算到一半的樣子），動畫只是套在成品上的一層皮。
+
+   延遲由 JS 依「離畫布中心多遠」寫進 --in-delay，所以圖看起來是
+   從中心往外長出來的，而不是整片一起閃。 */
+@keyframes tqg-pop{
+  from{opacity:0;transform:scale(.4)}
+  to  {opacity:1;transform:scale(1)}
+}
+@keyframes tqg-fade{ from{opacity:0} }
+
+/* ⚠ 動畫必須套在 circle／text 上，**不能套在外層的 .tqg-node 上**。
+
+   節點的位置是 SVG 的 `transform="translate(x,y)"` 屬性，而 CSS 的
+   `transform` 會**整個蓋掉**那個屬性——不是相加。第一版把 scale
+   動畫放在 .tqg-node 上，動畫期間每個節點的 translate 都被吃掉，
+   全部疊在畫布原點（左上角），等動畫結束、class 被移除才「跳」回
+   正確位置。使用者看到的是「node 一開始集中在左上方，隔幾秒才到位」。
+
+   circle 與 text 自己沒有 transform 屬性，套在它們身上就沒有衝突。 */
+.tqg-node.tqg-in circle,
+.tqg-node.tqg-in text{
+  transform-box:fill-box;transform-origin:center;
+  animation:tqg-pop .42s cubic-bezier(.2,.9,.3,1.2) both;
+  animation-delay:var(--in-delay,0ms);
+}
+.tqg-edge.tqg-in{animation:tqg-fade .6s ease-out .18s both}
+
+/* hover 的描邊變粗改成有過渡。上面那條 `.tqg-node circle{transition:none}`
+   是為了拖曳時不要有延遲，但拖曳動的是 <g> 的 transform、不是 circle
+   的屬性，所以這裡放行不影響拖曳手感。
+   放大本身仍由既有的 `.tqg-node.hot circle` 負責，不另外寫一份。 */
+.tqg-node circle{transition:stroke-width .14s ease}
+
+@media (prefers-reduced-motion: reduce){
+  .tqg-node.tqg-in circle,.tqg-node.tqg-in text,
+  .tqg-edge.tqg-in{animation:none}
+  .tqg-node circle{transition:none}
+}
